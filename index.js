@@ -162,8 +162,8 @@ app.get("/tote-preview", async (req, res) => {
       .toBuffer();
 
     // Position auf der Tasche
-    const offsetLeft = Math.round(toteMeta.width * 0.28);
-    const offsetTop = Math.round(toteMeta.height * 0.32);
+    const offsetLeft = Math.round(toteMeta.width * 0.26);
+    const offsetTop = Math.round(toteMeta.height * 0.26);
 
     const finalBuffer = await toteSharp
       .composite([
