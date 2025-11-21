@@ -5,96 +5,72 @@ import OpenAI from "openai";
 
 const app = express();
 
-// ---------- KONFIG ----------
-
-// OpenAI API-Key kommt aus Railway-Env: OPENAI_API_KEY
-const openai = new OpenAI({
+// OpenAI Client
+const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// Tragetaschen-Mockup (ohne Design)
+// Tragetaschen-Mockup (ohne eigenes Design)
 const TOTE_MOCKUP_URL =
   "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/Tragetasche_Mockup.jpg?v=1763713012";
 
-// Position und Größe des extrahierten Designs auf der Tragetasche
-const TOTE_OVERLAY_CONFIG = {
-  widthFactor: 0.55, // wie breit das Design auf der Tasche sein soll (relativ zur Mockup-Breite)
-  leftFactor: 0.225, // horizontale Position (0–1) – feinjustierbar
-  topFactor: 0.26   // vertikale Position (0–1) – feinjustierbar
-};
-
-// ---------- HILFSFUNKTIONEN ----------
-
-async function fetchImageBuffer(url) {
+// Hilfsfunktion: Bild herunterladen
+async function downloadImage(url) {
   const res = await fetch(url);
   if (!res.ok) {
-    throw new Error(`Bild-Download fehlgeschlagen: ${res.status} ${res.statusText}`);
+    throw new Error(`Bild-Download fehlgeschlagen: ${res.status} ${res.statusText} - ${url}`);
   }
-  const arr = await res.arrayBuffer();
-  return Buffer.from(arr);
+  const ab = await res.arrayBuffer();
+  return Buffer.from(ab);
 }
 
-/**
- * Ruft OpenAI auf, um aus einem Produkt-Mockup-Bild das Design freizustellen.
- * Erwartung: Eingabe = JPG/PNG aus _customization_image
- * Ausgabe: Buffer (PNG mit transparentem Hintergrund)
- */
+// Hilfsfunktion: Design aus Mockup mit OpenAI extrahieren
 async function extractDesignWithOpenAI(mockupBuffer) {
   if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY ist nicht gesetzt.");
+    throw new Error("OPENAI_API_KEY fehlt");
   }
 
   const base64Input = mockupBuffer.toString("base64");
 
-  // WICHTIG:
-  // Wir nutzen die neue Images-API mit gpt-image-1 und geben das Mockup als Bild-Input.
-  // Prompt: Design extrahieren, transparent, NICHT verändern.
-  const response = await openai.images.generate({
+  // WICHTIG: KEIN response_format MEHR
+  const response = await client.images.generate({
     model: "gpt-image-1",
     prompt:
-      "Das Design befindet sich auf einem Produkt-Mockup. " +
-      "Extrahiere exakt dieses Design inklusive aller Texte, Formen und Farben " +
-      "aus dem Mockup und gib es als PNG mit komplett transparentem Hintergrund zurück. " +
-      "Nichts hinzufügen, nichts weglassen, nichts neu zeichnen – nur das vorhandene Design freistellen.",
+      "Das Bild zeigt ein Kissen-Mockup mit einem personalisierten Design. " +
+      "Extrahiere EXAKT dieses Design (Bild + Text) ohne Hintergrund und ohne es zu verändern. " +
+      "Gib das Design als PNG mit transparentem Hintergrund zurück.",
     size: "1024x1024",
-    response_format: "b64_json",
-    // Bild-Input
-    image: [
-      {
-        image: base64Input
-      }
-    ]
+    // image-Input (aktuelles SDK akzeptiert 'image' als Base64-String)
+    image: base64Input,
+    n: 1
   });
 
+  // gpt-image-1 liefert immer b64_json
   const b64 = response.data[0].b64_json;
   const designPngBuffer = Buffer.from(b64, "base64");
   return designPngBuffer;
 }
 
-/**
- * Nimmt das freigestellte Design und legt es auf das Tragetaschen-Mockup.
- */
+// Hilfsfunktion: Design auf Tragetasche setzen
 async function composeDesignOnTote(designBuffer) {
-  const mockupBuffer = await fetchImageBuffer(TOTE_MOCKUP_URL);
+  const mockupBuffer = await downloadImage(TOTE_MOCKUP_URL);
   const mockup = sharp(mockupBuffer);
   const meta = await mockup.metadata();
 
   const mockW = meta.width || 2000;
   const mockH = meta.height || 2000;
 
-  const targetW = Math.round(mockW * TOTE_OVERLAY_CONFIG.widthFactor);
+  // Breite des Designs relativ zur Tasche
+  const targetWidth = Math.round(mockW * 0.55);
 
   const resizedDesign = await sharp(designBuffer)
-    .resize({
-      width: targetW,
-      height: null,
-      fit: "inside"
-    })
+    .resize({ width: targetWidth, fit: "inside" })
     .png()
     .toBuffer();
 
-  const left = Math.round(mockW * TOTE_OVERLAY_CONFIG.leftFactor);
-  const top = Math.round(mockH * TOTE_OVERLAY_CONFIG.topFactor);
+  // Position anpassen bis es optisch passt
+  const left = Math.round(mockW * 0.22);
+  const top = Math.round(mockH * 0.26);
 
   const composed = await sharp(mockupBuffer)
     .composite([
@@ -110,14 +86,7 @@ async function composeDesignOnTote(designBuffer) {
   return composed;
 }
 
-// ---------- ENDPOINTS ----------
-
-/**
- * Endpoint für komplette Tragetaschen-Vorschau:
- *
- * GET /tote-preview?url=<_customization_image URL>
- * -> gibt PNG der Tragetasche mit extrahiertem Design zurück
- */
+// Endpoint: /tote-preview
 app.get("/tote-preview", async (req, res) => {
   try {
     const srcUrl = req.query.url;
@@ -125,30 +94,31 @@ app.get("/tote-preview", async (req, res) => {
       return res.status(400).send("Missing ?url parameter");
     }
 
-    // 1. Mockup (_customization_image) laden
-    const mockupBuffer = await fetchImageBuffer(srcUrl);
+    // 1. Kissen-Mockup (_customization_image) laden
+    const pillowMockup = await downloadImage(srcUrl);
 
-    // 2. Design durch OpenAI extrahieren (transparentes PNG)
-    const designBuffer = await extractDesignWithOpenAI(mockupBuffer);
+    // 2. Design mit OpenAI extrahieren (transparentes PNG)
+    const designPng = await extractDesignWithOpenAI(pillowMockup);
 
-    // 3. Design auf Tragetaschen-Mockup setzen
-    const totePreviewBuffer = await composeDesignOnTote(designBuffer);
+    // 3. Design auf Tragetasche setzen
+    const totePreview = await composeDesignOnTote(designPng);
 
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.send(totePreviewBuffer);
+    res.send(totePreview);
   } catch (err) {
-    console.error("Error in /tote-preview:", err);
+    console.error("Fehler in /tote-preview:", err);
     res.status(500).send("Internal server error");
   }
 });
 
-// Optional: Healthcheck
+// Healthcheck
 app.get("/", (_req, res) => {
-  res.send("Teeinblue AI Artwork Backend läuft.");
+  res.send("Teeinblue Artwork Backend läuft.");
 });
 
+// Server starten
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Artwork AI backend listening on port ${PORT}`);
+  console.log("Server läuft auf Port", PORT);
 });
