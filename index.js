@@ -117,7 +117,7 @@ app.get("/tote-preview", async (req, res) => {
           "Das Bild zeigt ein Produkt-Mockup mit einem Druckmotiv auf einem Kissen. " +
           "Extrahiere NUR das eigentliche Druckmotiv (Design) inklusive seiner jetzigen grafischen Elemente " +
           "(Hintergrundfarbe, Brush-Rand, Text, Herzen etc.). " +
-          "ALLES, was aktuell Kissen, Sofa, Wand, Umgebung oder zusätzliche weiße Fläche ist, " +
+          "ALLES, was aktuell Kissen, Sofa, T-Shirt, Pullover, Tasse Wand, Umgebung oder zusätzliche weiße Fläche ist, " +
           "muss komplett TRANSPARENT werden. " +
           "Das Ergebnis muss ein PNG mit Alphakanal sein, ohne zusätzliche weiße oder farbige Hintergründe. " +
           "Es darf KEIN neuer weißer Rahmen oder Hintergrund hinzugefügt werden.",
