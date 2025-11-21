@@ -80,9 +80,11 @@ app.get("/tote-preview", async (req, res) => {
     const srcArrayBuf = await srcResp.arrayBuffer();
     const srcBuffer = Buffer.from(srcArrayBuf);
 
-    // 2. In quadratisches PNG bringen (z.B. 1024x1024, transparenter Rand)
+    // 2. In quadratisches PNG bringen – etwas kleinere Auflösung (768) für mehr Speed
+    const WORK_SIZE = 768;
+
     const squarePngBuffer = await sharp(srcBuffer)
-      .resize(1024, 1024, {
+      .resize(WORK_SIZE, WORK_SIZE, {
         fit: "contain",
         background: { r: 0, g: 0, b: 0, alpha: 0 },
       })
@@ -108,7 +110,7 @@ app.get("/tote-preview", async (req, res) => {
           "muss komplett TRANSPARENT werden. " +
           "Das Ergebnis muss ein PNG mit Alphakanal sein, ohne zusätzliche weiße oder farbige Hintergründe. " +
           "Es darf KEIN neuer weißer Rahmen oder Hintergrund hinzugefügt werden.",
-        size: "1024x1024",
+        size: `${WORK_SIZE}x${WORK_SIZE}`, // 768x768 für etwas mehr Speed
       });
     } catch (err) {
       console.error("OpenAI-Fehler in /tote-preview:", {
@@ -155,15 +157,17 @@ app.get("/tote-preview", async (req, res) => {
         .json({ error: "Konnte Größe des Tragetaschen-Mockups nicht lesen." });
     }
 
-    // Design skalieren
+    // Design skalieren (Breite ~45% der Tasche)
     const designOnToteBuffer = await sharp(designPngBuffer)
       .resize(Math.round(toteMeta.width * 0.45))
       .png()
       .toBuffer();
 
-    // Position auf der Tasche
+    // Position auf der Tasche:
+    // - etwas weiter nach links => Faktor von 0.28 -> 0.26 reduziert
+    // - deutlich weiter nach unten => Faktor von 0.32 -> 0.36 erhöht
     const offsetLeft = Math.round(toteMeta.width * 0.26);
-    const offsetTop = Math.round(toteMeta.height * 0.26);
+    const offsetTop = Math.round(toteMeta.height * 0.36);
 
     const finalBuffer = await toteSharp
       .composite([
