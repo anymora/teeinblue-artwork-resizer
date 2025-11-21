@@ -1,16 +1,16 @@
 {
   "name": "teeinblue-artwork-resizer",
   "version": "1.0.0",
-  "description": "Teeinblue Artwork Extract + Tote Preview Backend",
-  "main": "index.js",
+  "description": "Backend für KI-basiertes Artwork-Extrahieren & Tragetaschen-Mockup",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
+    "express": "^4.21.1",
     "node-fetch": "^3.3.2",
-    "sharp": "^0.33.2",
-    "openai": "^4.52.0"
+    "openai": "^4.99.0",
+    "sharp": "^0.33.5"
   }
 }
