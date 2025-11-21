@@ -14,7 +14,7 @@ const client = new OpenAI({
 const TOTE_MOCKUP_URL =
   "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/Tragetasche_Mockup.jpg?v=1763713012";
 
-// Kleine Helper-Funktion zum Laden von Bildern als Buffer
+// Bild von URL laden
 async function downloadImage(url) {
   const res = await fetch(url);
   if (!res.ok) {
@@ -44,19 +44,19 @@ app.get("/tote-preview", async (req, res) => {
     const cushionBuffer = await downloadImage(url);
 
     // 2) Design mit GPT-Image-1 aus dem Mockup extrahieren
-    //    WICHTIG: Buffer muss einen Dateinamen bekommen, sonst weiß die Lib nicht, dass es ein PNG/JPG ist
+    //    Buffer als Datei deklarieren, damit das SDK weiß, dass es ein Bild ist
     const cushionFile = Buffer.from(cushionBuffer);
     cushionFile.name = "cushion_mockup.jpg";
 
     const aiResponse = await client.images.edit({
       model: "gpt-image-1",
-      // gpt-image-1 akzeptiert ein oder mehrere Bilder – wir geben hier eins
-      image: [cushionFile],
+      // ❗ FIX: KEIN Array, sondern EIN Feld "image"
+      image: cushionFile,
       prompt:
-        "Das Design befindet sich auf einem Mockup (z.B. Kissen). "
-        + "Extrahiere exakt dieses Design ohne es zu verändern aus dem Mockup, "
-        + "entferne den Hintergrund und alle Mockup-Elemente "
-        + "und gib nur das Design mit transparentem Hintergrund als PNG zurück.",
+        "Das Bild zeigt ein Kissen-Mockup mit einem personalisierten Design. " +
+        "Extrahiere exakt dieses Design (Bild + Text) ohne den Kissen-Hintergrund " +
+        "und ohne das Design zu verändern. " +
+        "Gib nur das Design mit komplett transparentem Hintergrund als PNG zurück.",
       size: "1024x1024",
       n: 1,
       response_format: "b64_json"
@@ -68,8 +68,7 @@ app.get("/tote-preview", async (req, res) => {
     // 3) Tragetaschen-Mockup laden
     const toteBuffer = await downloadImage(TOTE_MOCKUP_URL);
 
-    // 4) Design auf Tragetasche legen
-    //    Hier kannst du Größe & Position der Artwork-Vorschau fein-tunen
+    // 4) Design auf Tragetasche legen – Größe & Position kannst du nachjustieren
     const resizedDesignBuffer = await sharp(designPngBuffer)
       .resize({
         width: 700,       // Breite des Designs auf der Tragetasche
