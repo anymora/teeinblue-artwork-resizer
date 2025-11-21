@@ -99,6 +99,7 @@ app.get("/tote-preview", async (req, res) => {
         background: { r: 0, g: 0, b: 0, alpha: 0 },
         fastShrinkOnLoad: true,
       })
+      .ensureAlpha()
       .png()
       .toBuffer();
 
@@ -107,7 +108,7 @@ app.get("/tote-preview", async (req, res) => {
       type: "image/png",
     });
 
-    // 3. OpenAI: Design aus dem Mockup freistellen – mit TRANSPARENTEM Hintergrund
+    // 3. OpenAI: Design aus dem Mockup freistellen – mit ECHTEM Alphakanal
     let editResult;
     try {
       editResult = await openai.images.edit({
@@ -115,12 +116,12 @@ app.get("/tote-preview", async (req, res) => {
         image: imageFile,
         prompt:
           "Das Bild zeigt ein Produkt-Mockup mit einem Druckmotiv auf einem Kissen. " +
-          "Extrahiere NUR das eigentliche Druckmotiv (Design) inklusive seiner jetzigen grafischen Elemente " +
+          "Extrahiere NUR das eigentliche Druckmotiv (Design) inklusive aller grafischen Elemente " +
           "(Hintergrundfarbe, Brush-Rand, Text, Herzen etc.). " +
-          "ALLES, was aktuell Kissen, Sofa, T-Shirt, Pullover, Tasse Wand, Umgebung oder zusätzliche weiße Fläche ist, " +
-          "muss komplett TRANSPARENT werden. " +
-          "Das Ergebnis muss ein PNG mit Alphakanal sein, ohne zusätzliche weiße oder farbige Hintergründe. " +
-          "Es darf KEIN neuer weißer Rahmen oder Hintergrund hinzugefügt werden.",
+          "Der Hintergrund außerhalb des Motivs muss vollständig transparent sein (Alphakanal = 0). " +
+          "ERZEUGE KEIN kariertes Muster, KEINE grauen/weißen Kacheln und KEINE grafische Darstellung von Transparenz. " +
+          "Zeige an den transparenten Stellen einfach gar nichts, kein zusätzliches Weiß oder Grau. " +
+          "Das Ergebnis muss ein PNG mit Alphakanal sein und darf keinen sichtbaren Rahmen oder rechteckige Hintergrundfläche haben.",
         size: "1024x1024",
       });
     } catch (err) {
@@ -146,7 +147,13 @@ app.get("/tote-preview", async (req, res) => {
         .status(500)
         .json({ error: "OpenAI hat kein Bild zurückgegeben." });
     }
-    const designPngBuffer = Buffer.from(designB64, "base64");
+    let designPngBuffer = Buffer.from(designB64, "base64");
+
+    // Sicherheit: sicherstellen, dass wir einen Alphakanal haben
+    designPngBuffer = await sharp(designPngBuffer)
+      .ensureAlpha()
+      .png()
+      .toBuffer();
 
     // 4. Tragetaschen-Mockup laden
     const toteResp = await fetch(TOTE_MOCKUP_URL);
@@ -175,10 +182,10 @@ app.get("/tote-preview", async (req, res) => {
       .toBuffer();
 
     // Position auf der Tasche:
-    // - etwas weiter nach links => 0.26
-    // - etwas weiter nach unten => 0.36
+    // - etwas weiter nach links (0.26)
+    // - etwas weiter nach unten (0.36)
     const offsetLeft = Math.round(toteMeta.width * 0.26);
-    const offsetTop = Math.round(toteMeta.height * 0.46);
+    const offsetTop = Math.round(toteMeta.height * 0.36);
 
     const finalBuffer = await toteSharp
       .composite([
