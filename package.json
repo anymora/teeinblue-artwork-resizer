@@ -1,7 +1,7 @@
 {
-  "name": "teeinblue-artwork-ai-backend",
+  "name": "teeinblue-artwork-resizer",
   "version": "1.0.0",
-  "description": "Backend für Teeinblue-Upsell: KI extrahiert Design aus Mockup und setzt es auf Tragetaschen-Mockup.",
+  "description": "Teeinblue Artwork Extract + Tote Preview Backend",
   "main": "index.js",
   "type": "module",
   "scripts": {
