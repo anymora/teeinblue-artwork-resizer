@@ -15,6 +15,9 @@ const openai = new OpenAI({
 const TOTE_MOCKUP_URL =
   "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/Tragetasche_Mockup.jpg?v=1763713012";
 
+// Einfacher In-Memory-Cache: sourceUrl -> fertiges PNG
+const previewCache = new Map(); // key: sourceUrl, value: Buffer
+
 // Healthcheck
 app.get("/", (req, res) => {
   res.send("teeinblue-artwork-resizer läuft.");
@@ -29,7 +32,7 @@ app.get("/test-openai", async (req, res) => {
     const models = await openai.images.generate({
       model: "gpt-image-1",
       prompt: "test",
-      size: "256x256",
+      size: "1024x1024",
     });
 
     res.json({
@@ -68,6 +71,13 @@ app.get("/tote-preview", async (req, res) => {
       .json({ error: "Parameter 'url' fehlt oder ist ungültig." });
   }
 
+  // 0. Cache-Hit? -> sofort zurück
+  if (previewCache.has(sourceUrl)) {
+    const cachedBuffer = previewCache.get(sourceUrl);
+    res.setHeader("Content-Type", "image/png");
+    return res.send(cachedBuffer);
+  }
+
   try {
     // 1. Mockup vom Kunden (z.B. Kopfkissen) laden
     const srcResp = await fetch(sourceUrl);
@@ -80,13 +90,14 @@ app.get("/tote-preview", async (req, res) => {
     const srcArrayBuf = await srcResp.arrayBuffer();
     const srcBuffer = Buffer.from(srcArrayBuf);
 
-    // 2. In quadratisches PNG bringen – etwas kleinere Auflösung (768) für mehr Speed
-    const WORK_SIZE = 768;
+    // 2. In quadratisches PNG bringen – 1024x1024 (Pflichtgröße für gpt-image-1)
+    const WORK_SIZE = 1024;
 
     const squarePngBuffer = await sharp(srcBuffer)
       .resize(WORK_SIZE, WORK_SIZE, {
         fit: "contain",
         background: { r: 0, g: 0, b: 0, alpha: 0 },
+        fastShrinkOnLoad: true,
       })
       .png()
       .toBuffer();
@@ -110,7 +121,7 @@ app.get("/tote-preview", async (req, res) => {
           "muss komplett TRANSPARENT werden. " +
           "Das Ergebnis muss ein PNG mit Alphakanal sein, ohne zusätzliche weiße oder farbige Hintergründe. " +
           "Es darf KEIN neuer weißer Rahmen oder Hintergrund hinzugefügt werden.",
-        size: `${WORK_SIZE}x${WORK_SIZE}`, // 768x768 für etwas mehr Speed
+        size: "1024x1024",
       });
     } catch (err) {
       console.error("OpenAI-Fehler in /tote-preview:", {
@@ -164,8 +175,8 @@ app.get("/tote-preview", async (req, res) => {
       .toBuffer();
 
     // Position auf der Tasche:
-    // - etwas weiter nach links => Faktor von 0.28 -> 0.26 reduziert
-    // - deutlich weiter nach unten => Faktor von 0.32 -> 0.36 erhöht
+    // - etwas weiter nach links => 0.26
+    // - etwas weiter nach unten => 0.36
     const offsetLeft = Math.round(toteMeta.width * 0.26);
     const offsetTop = Math.round(toteMeta.height * 0.36);
 
@@ -179,6 +190,9 @@ app.get("/tote-preview", async (req, res) => {
       ])
       .png()
       .toBuffer();
+
+    // In Cache legen (für zukünftige Aufrufe mit gleicher URL)
+    previewCache.set(sourceUrl, finalBuffer);
 
     // 5. Fertiges Bild zurückgeben
     res.setHeader("Content-Type", "image/png");
