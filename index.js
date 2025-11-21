@@ -15,9 +15,46 @@ const openai = new OpenAI({
 const TOTE_MOCKUP_URL =
   "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/Tragetasche_Mockup.jpg?v=1763713012";
 
-// Nur zum Check
+// Healthcheck
 app.get("/", (req, res) => {
   res.send("teeinblue-artwork-resizer läuft.");
+});
+
+/**
+ * Debug-Route: prüft NUR, ob der Server OpenAI überhaupt erreicht.
+ * GET /test-openai
+ */
+app.get("/test-openai", async (req, res) => {
+  try {
+    // sehr leichter Call – nur zum Testen der Verbindung
+    const models = await openai.images.generate({
+      model: "gpt-image-1",
+      prompt: "test",
+      size: "256x256"
+    });
+
+    res.json({
+      ok: true,
+      info: "OpenAI erreichbar",
+      type: typeof models
+    });
+  } catch (err) {
+    console.error("Fehler in /test-openai:", {
+      message: err.message,
+      name: err.name,
+      code: err.code,
+      status: err.status,
+      response: err.response?.data
+    });
+
+    res.status(500).json({
+      error: "Fehler in /test-openai",
+      message: err.message,
+      name: err.name,
+      code: err.code,
+      status: err.status
+    });
+  }
 });
 
 /**
@@ -61,22 +98,39 @@ app.get("/tote-preview", async (req, res) => {
       .png()
       .toBuffer();
 
-    // --- WICHTIG: korrektes File-Objekt für das OpenAI-SDK ---
+    // File-Objekt für OpenAI bauen
     const imageFile = await toFile(squarePngBuffer, "mockup.png", {
       type: "image/png",
     });
 
     // 3. OpenAI: Design aus dem Mockup freistellen
-    const editResult = await openai.images.edit({
-      model: "gpt-image-1",
-      image: imageFile, // jetzt echtes File-Objekt, kein image.name-Fehler mehr
-      prompt:
-        "Das Bild zeigt ein Produkt-Mockup mit einem Druckmotiv. " +
-        "Extrahiere nur das Druckmotiv (Design) ohne Kissen, Sofa oder Hintergrund. " +
-        "Gib ein quadratisches transparentes PNG zurück, auf dem nur das Motiv zu sehen ist.",
-      size: "1024x1024"
-      // response_format weglassen, Default ist b64_json
-    });
+    let editResult;
+    try {
+      editResult = await openai.images.edit({
+        model: "gpt-image-1",
+        image: imageFile,
+        prompt:
+          "Das Bild zeigt ein Produkt-Mockup mit einem Druckmotiv. " +
+          "Extrahiere nur das Druckmotiv (Design) ohne Kissen, Sofa oder Hintergrund. " +
+          "Gib ein quadratisches transparentes PNG zurück, auf dem nur das Motiv zu sehen ist.",
+        size: "1024x1024"
+      });
+    } catch (err) {
+      console.error("OpenAI-Fehler in /tote-preview:", {
+        message: err.message,
+        name: err.name,
+        code: err.code,
+        status: err.status,
+        response: err.response?.data
+      });
+
+      return res.status(500).json({
+        error: "OpenAI-Fehler in /tote-preview",
+        message: err.message,
+        code: err.code,
+        status: err.status
+      });
+    }
 
     const designB64 = editResult.data[0].b64_json;
     if (!designB64) {
@@ -100,21 +154,19 @@ app.get("/tote-preview", async (req, res) => {
     const toteSharp = sharp(toteBuffer);
     const toteMeta = await toteSharp.metadata();
 
-    // Falls keine Größeninfos da sind, abbrechen
     if (!toteMeta.width || !toteMeta.height) {
       return res
         .status(500)
         .json({ error: "Konnte Größe des Tragetaschen-Mockups nicht lesen." });
     }
 
-    // Design auf eine sinnvolle Größe für die Tasche skalieren
-    // (Werte musst du später visuell feinjustieren)
+    // Design skalieren
     const designOnToteBuffer = await sharp(designPngBuffer)
-      .resize(Math.round(toteMeta.width * 0.45)) // Breite ~45% der Tasche
+      .resize(Math.round(toteMeta.width * 0.45))
       .png()
       .toBuffer();
 
-    // Position auf der Tasche (leicht nach unten & etwas nach links)
+    // Position auf der Tasche
     const offsetLeft = Math.round(toteMeta.width * 0.28);
     const offsetTop = Math.round(toteMeta.height * 0.32);
 
@@ -133,7 +185,7 @@ app.get("/tote-preview", async (req, res) => {
     res.setHeader("Content-Type", "image/png");
     res.send(finalBuffer);
   } catch (err) {
-    console.error("Fehler in /tote-preview:", err);
+    console.error("Fehler in /tote-preview (gesamt):", err);
     return res.status(500).json({
       error: "Interner Fehler in /tote-preview",
       detail: err.message || String(err),
