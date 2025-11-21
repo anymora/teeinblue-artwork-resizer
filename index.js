@@ -12,16 +12,15 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// Dein Tragetaschen-Mockup (ohne Design)
+// Tragetaschen-Mockup (ohne Design)
 const TOTE_MOCKUP_URL =
   "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/Tragetasche_Mockup.jpg?v=1763713012";
 
-// Position und Größe des Designs auf der Tragetasche
-// -> ggf. mit echten Werten feinjustieren
+// Position und Größe des extrahierten Designs auf der Tragetasche
 const TOTE_OVERLAY_CONFIG = {
-  widthFactor: 0.40, // Bereich auf der Tasche relativ zur Breite
-  leftFactor: 0.30,  // Position von links (0-1)
-  topFactor: 0.35    // Position von oben (0-1)
+  widthFactor: 0.55, // wie breit das Design auf der Tasche sein soll (relativ zur Mockup-Breite)
+  leftFactor: 0.225, // horizontale Position (0–1) – feinjustierbar
+  topFactor: 0.26   // vertikale Position (0–1) – feinjustierbar
 };
 
 // ---------- HILFSFUNKTIONEN ----------
@@ -45,27 +44,26 @@ async function extractDesignWithOpenAI(mockupBuffer) {
     throw new Error("OPENAI_API_KEY ist nicht gesetzt.");
   }
 
-  // OpenAI Images API: wir nutzen gpt-image-1 mit einer klaren Anweisung
-  // Hinweis: OpenAI-Images-API liefert base64 PNG zurück.
   const base64Input = mockupBuffer.toString("base64");
 
+  // WICHTIG:
+  // Wir nutzen die neue Images-API mit gpt-image-1 und geben das Mockup als Bild-Input.
+  // Prompt: Design extrahieren, transparent, NICHT verändern.
   const response = await openai.images.generate({
     model: "gpt-image-1",
     prompt:
-      "Extract only the printed design from this product mockup. " +
-      "Return a PNG with transparent background, keeping the design's shape and proportions. " +
-      "Do not add new elements, do not change colors, do not change text. " +
-      "Just isolate the existing design on transparency.",
-    // Wir nutzen image-to-image, indem wir das Originalbild als Referenz anhängen
-    // (Die OpenAI Node-Lib akzeptiert base64 über 'image' im aktuellen SDK.)
+      "Das Design befindet sich auf einem Produkt-Mockup. " +
+      "Extrahiere exakt dieses Design inklusive aller Texte, Formen und Farben " +
+      "aus dem Mockup und gib es als PNG mit komplett transparentem Hintergrund zurück. " +
+      "Nichts hinzufügen, nichts weglassen, nichts neu zeichnen – nur das vorhandene Design freistellen.",
+    size: "1024x1024",
+    response_format: "b64_json",
+    // Bild-Input
     image: [
       {
         image: base64Input
       }
-    ],
-    size: "1024x1024",
-    n: 1,
-    response_format: "b64_json"
+    ]
   });
 
   const b64 = response.data[0].b64_json;
@@ -74,7 +72,7 @@ async function extractDesignWithOpenAI(mockupBuffer) {
 }
 
 /**
- * Nimmt freigestelltes Design (PNG) und legt es auf das Tragetaschen-Mockup.
+ * Nimmt das freigestellte Design und legt es auf das Tragetaschen-Mockup.
  */
 async function composeDesignOnTote(designBuffer) {
   const mockupBuffer = await fetchImageBuffer(TOTE_MOCKUP_URL);
@@ -115,35 +113,10 @@ async function composeDesignOnTote(designBuffer) {
 // ---------- ENDPOINTS ----------
 
 /**
- * 1) Nur das extrahierte Design aus einem Mockup liefern
- *
- * GET /extract-design?url=<_customization_image URL>
- * -> gibt PNG des freigestellten Designs zurück (Content-Type: image/png)
- */
-app.get("/extract-design", async (req, res) => {
-  try {
-    const srcUrl = req.query.url;
-    if (!srcUrl) {
-      return res.status(400).send("Missing ?url parameter");
-    }
-
-    const mockupBuffer = await fetchImageBuffer(srcUrl);
-    const designBuffer = await extractDesignWithOpenAI(mockupBuffer);
-
-    res.setHeader("Content-Type", "image/png");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.send(designBuffer);
-  } catch (err) {
-    console.error("Error in /extract-design:", err);
-    res.status(500).send("Internal server error");
-  }
-});
-
-/**
- * 2) Vollständige Tragetaschen-Vorschau: KI-extrahiertes Design auf Tasche
+ * Endpoint für komplette Tragetaschen-Vorschau:
  *
  * GET /tote-preview?url=<_customization_image URL>
- * -> gibt PNG der Tragetasche mit Design zurück (Content-Type: image/png)
+ * -> gibt PNG der Tragetasche mit extrahiertem Design zurück
  */
 app.get("/tote-preview", async (req, res) => {
   try {
@@ -152,8 +125,13 @@ app.get("/tote-preview", async (req, res) => {
       return res.status(400).send("Missing ?url parameter");
     }
 
+    // 1. Mockup (_customization_image) laden
     const mockupBuffer = await fetchImageBuffer(srcUrl);
+
+    // 2. Design durch OpenAI extrahieren (transparentes PNG)
     const designBuffer = await extractDesignWithOpenAI(mockupBuffer);
+
+    // 3. Design auf Tragetaschen-Mockup setzen
     const totePreviewBuffer = await composeDesignOnTote(designBuffer);
 
     res.setHeader("Content-Type", "image/png");
@@ -165,7 +143,7 @@ app.get("/tote-preview", async (req, res) => {
   }
 });
 
-// Healthcheck
+// Optional: Healthcheck
 app.get("/", (_req, res) => {
   res.send("Teeinblue AI Artwork Backend läuft.");
 });
