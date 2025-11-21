@@ -1,110 +1,150 @@
 // index.js
 import express from "express";
 import fetch from "node-fetch";
-import OpenAI, { toFile } from "openai";
+import sharp from "sharp";
+import OpenAI from "openai";
 
 const app = express();
-const port = process.env.PORT || 8080;
 
-// OpenAI-Client
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+// OpenAI-Client, liest deinen Key aus Railway-ENV OPENAI_API_KEY
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Dein Tragetaschen-Mockup (Hintergrundbild)
+// Tote-Mockup (Hintergrund) – dein Shopify-Bild
 const TOTE_MOCKUP_URL =
   "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/Tragetasche_Mockup.jpg?v=1763713012";
 
-/**
- * Hilfsfunktion: Remote-Bild laden und in ein File für OpenAI konvertieren
- */
-async function fetchAsFile(url, fileName) {
-  const resp = await fetch(url);
-  if (!resp.ok) {
-    throw new Error(`Bild konnte nicht geladen werden: ${url} (Status ${resp.status})`);
-  }
-  const arrayBuffer = await resp.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-
-  // toFile macht daraus ein gültiges "FileLike" Objekt
-  // WICHTIG: keine zusätzlichen Felder wie "name" oder "data" selbst bauen
-  const file = await toFile(buffer, fileName, {
-    type: "image/jpeg" // Shopify-Mockups sind i.d.R. JPG
-  });
-
-  return file;
-}
+// Nur zum Check
+app.get("/", (req, res) => {
+  res.send("teeinblue-artwork-resizer läuft.");
+});
 
 /**
- * GET /tote-preview?url=<URL_ZUM_KISSEN_MOCKUP>
+ * GET /tote-preview?url=<URL_DES_KISSEN_MOCKUPS>
  *
- * 1. Holt das personalisierte Kissen-Mockup (Teeinblue _customization_image)
- * 2. Holt das Tragetaschen-Mockup
- * 3. Schickt beides an gpt-image-1 mit Prompt:
- *    - Design vom Kissen extrahieren
- *    - Auf die Tragetasche legen
- * 4. Gibt eine Image-URL von OpenAI zurück
+ * Ablauf:
+ * 1. Kissen-Mockup von der URL holen
+ * 2. In quadratisches PNG konvertieren
+ * 3. An OpenAI (gpt-image-1, images.edit) schicken:
+ *      → Prompt: Design aus Mockup freistellen (transparent)
+ * 4. Freigestelltes Design nehmen, auf Tragetaschen-Mockup platzieren
+ * 5. Fertiges Bild als PNG zurückgeben
  */
 app.get("/tote-preview", async (req, res) => {
   const sourceUrl = req.query.url;
 
-  if (!sourceUrl) {
+  if (!sourceUrl || typeof sourceUrl !== "string") {
     return res
       .status(400)
-      .json({ error: "Fehlender Parameter ?url=<LINK_ZUM_KISSEN_MOCKUP>" });
+      .json({ error: "Parameter 'url' fehlt oder ist ungültig." });
   }
 
   try {
-    console.log("Starte /tote-preview mit URL:", sourceUrl);
-
-    // 1) Kissen-Mockup als File
-    const cushionFile = await fetchAsFile(sourceUrl, "cushion-mockup.jpg");
-
-    // 2) Tragetaschen-Mockup als File
-    const toteFile = await fetchAsFile(TOTE_MOCKUP_URL, "tote-mockup.jpg");
-
-    // 3) Beide Bilder an gpt-image-1 schicken
-    //    image[0] = Kissen (Quelle des Designs)
-    //    image[1] = Tragetasche (Ziel-Mockup)
-    const result = await client.images.edit({
-      model: "gpt-image-1",
-      image: [cushionFile, toteFile],
-      prompt:
-        "Im ersten Bild ist ein personalisiertes Design auf einem Kissen zu sehen. " +
-        "Extrahiere EXAKT dieses komplette Design (inklusive Text, Farben, Schlagschatten usw.) " +
-        "transparent aus dem Kissen und platziere es perspektivisch korrekt und gut lesbar " +
-        "auf dem zweiten Bild auf der beigen Tragetasche in der Mitte. " +
-        "Hintergrund und Umgebung des zweiten Bildes (Holz, Wand, Haken, Blumen) bleiben erhalten. " +
-        "Nichts am Design verändern, nur sauber vom Kissen lösen und auf die Tragetasche legen.",
-      // Optional kannst du size/quality anpassen
-      size: "1024x1024"
-    });
-
-    if (!result || !result.data || !result.data[0] || !result.data[0].url) {
-      console.error("OpenAI Images-Antwort unerwartet:", result);
-      return res.status(500).json({
-        error: "OpenAI Images Antwort ohne URL zurückgegeben"
+    // 1. Mockup vom Kunden (z.B. Kopfkissen) laden
+    const srcResp = await fetch(sourceUrl);
+    if (!srcResp.ok) {
+      return res.status(400).json({
+        error: "Konnte Quellbild nicht laden.",
+        detail: `HTTP ${srcResp.status}`,
       });
     }
+    const srcArrayBuf = await srcResp.arrayBuffer();
+    const srcBuffer = Buffer.from(srcArrayBuf);
 
-    const imageUrl = result.data[0].url;
+    // 2. In quadratisches PNG bringen (z.B. 1024x1024, transparenter Rand)
+    const squarePngBuffer = await sharp(srcBuffer)
+      .resize(1024, 1024, {
+        fit: "contain",
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+      })
+      .png()
+      .toBuffer();
 
-    // 4) Einfach als JSON zurückgeben
-    res.json({ url: imageUrl });
+    // *** WICHTIGER FIX ***
+    // Für das Node-SDK: Buffer direkt als "image" übergeben
+    // und nur die .name-Eigenschaft setzen.
+    const imageFile = squarePngBuffer;
+    // @ts-ignore – wir hängen der Buffer-Instanz ein name-Feld an
+    imageFile.name = "mockup.png";
+
+    // 3. OpenAI: Design aus dem Mockup freistellen
+    const editResult = await openai.images.edit({
+      model: "gpt-image-1",
+      image: imageFile, // KEIN { name: ..., data: ... } – direkt der Buffer!
+      prompt:
+        "Das Bild zeigt ein Produkt-Mockup mit einem Druckmotiv. " +
+        "Extrahiere nur das Druckmotiv (Design) ohne Kissen, Sofa oder Hintergrund. " +
+        "Gib ein quadratisches transparentes PNG zurück, auf dem nur das Motiv zu sehen ist.",
+      size: "1024x1024",
+      // response_format weglassen, Default ist b64_json
+    });
+
+    const designB64 = editResult.data[0].b64_json;
+    if (!designB64) {
+      return res
+        .status(500)
+        .json({ error: "OpenAI hat kein Bild zurückgegeben." });
+    }
+    const designPngBuffer = Buffer.from(designB64, "base64");
+
+    // 4. Tragetaschen-Mockup laden
+    const toteResp = await fetch(TOTE_MOCKUP_URL);
+    if (!toteResp.ok) {
+      return res.status(500).json({
+        error: "Konnte Tragetaschen-Mockup nicht laden.",
+        detail: `HTTP ${toteResp.status}`,
+      });
+    }
+    const toteArrayBuf = await toteResp.arrayBuffer();
+    const toteBuffer = Buffer.from(toteArrayBuf);
+
+    const toteSharp = sharp(toteBuffer);
+    const toteMeta = await toteSharp.metadata();
+
+    // Falls keine Größeninfos da sind, abbrechen
+    if (!toteMeta.width || !toteMeta.height) {
+      return res
+        .status(500)
+        .json({ error: "Konnte Größe des Tragetaschen-Mockups nicht lesen." });
+    }
+
+    // Design auf eine sinnvolle Größe für die Tasche skalieren
+    // (Werte musst du später visuell feinjustieren)
+    const designOnToteBuffer = await sharp(designPngBuffer)
+      .resize(Math.round(toteMeta.width * 0.45)) // Breite ~45% der Tasche
+      .png()
+      .toBuffer();
+
+    // Position auf der Tasche (leicht nach unten & etwas nach links)
+    const offsetLeft = Math.round(toteMeta.width * 0.28);
+    const offsetTop = Math.round(toteMeta.height * 0.32);
+
+    const finalBuffer = await toteSharp
+      .composite([
+        {
+          input: designOnToteBuffer,
+          left: offsetLeft,
+          top: offsetTop,
+        },
+      ])
+      .png()
+      .toBuffer();
+
+    // 5. Fertiges Bild zurückgeben
+    res.setHeader("Content-Type", "image/png");
+    res.send(finalBuffer);
   } catch (err) {
     console.error("Fehler in /tote-preview:", err);
-    res.status(500).json({
+    return res.status(500).json({
       error: "Interner Fehler in /tote-preview",
-      detail: String(err.message || err)
+      detail: err.message || String(err),
     });
   }
 });
 
-// Healthcheck
-app.get("/", (_req, res) => {
-  res.send("teeinblue-artwork-resizer läuft.");
-});
-
-app.listen(port, () => {
-  console.log(`Server läuft auf Port ${port}`);
+// Server starten
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`Server läuft auf Port ${PORT}`);
 });
