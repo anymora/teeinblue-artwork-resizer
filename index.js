@@ -26,17 +26,16 @@ app.get("/", (req, res) => {
  */
 app.get("/test-openai", async (req, res) => {
   try {
-    // sehr leichter Call – nur zum Testen der Verbindung
     const models = await openai.images.generate({
       model: "gpt-image-1",
       prompt: "test",
-      size: "256x256"
+      size: "256x256",
     });
 
     res.json({
       ok: true,
       info: "OpenAI erreichbar",
-      type: typeof models
+      type: typeof models,
     });
   } catch (err) {
     console.error("Fehler in /test-openai:", {
@@ -44,7 +43,7 @@ app.get("/test-openai", async (req, res) => {
       name: err.name,
       code: err.code,
       status: err.status,
-      response: err.response?.data
+      response: err.response?.data,
     });
 
     res.status(500).json({
@@ -52,21 +51,13 @@ app.get("/test-openai", async (req, res) => {
       message: err.message,
       name: err.name,
       code: err.code,
-      status: err.status
+      status: err.status,
     });
   }
 });
 
 /**
  * GET /tote-preview?url=<URL_DES_KISSEN_MOCKUPS>
- *
- * Ablauf:
- * 1. Kissen-Mockup von der URL holen
- * 2. In quadratisches PNG konvertieren
- * 3. An OpenAI (gpt-image-1, images.edit) schicken:
- *      → Prompt: Design aus Mockup freistellen (transparent)
- * 4. Freigestelltes Design nehmen, auf Tragetaschen-Mockup platzieren
- * 5. Fertiges Bild als PNG zurückgeben
  */
 app.get("/tote-preview", async (req, res) => {
   const sourceUrl = req.query.url;
@@ -103,17 +94,21 @@ app.get("/tote-preview", async (req, res) => {
       type: "image/png",
     });
 
-    // 3. OpenAI: Design aus dem Mockup freistellen
+    // 3. OpenAI: Design aus dem Mockup freistellen – mit TRANSPARENTEM Hintergrund
     let editResult;
     try {
       editResult = await openai.images.edit({
         model: "gpt-image-1",
         image: imageFile,
         prompt:
-          "Das Bild zeigt ein Produkt-Mockup mit einem Druckmotiv. " +
-          "Extrahiere nur das Druckmotiv (Design) ohne Kissen, Sofa oder Hintergrund. " +
-          "Gib ein quadratisches transparentes PNG zurück, auf dem nur das Motiv zu sehen ist.",
-        size: "1024x1024"
+          "Das Bild zeigt ein Produkt-Mockup mit einem Druckmotiv auf einem Kissen. " +
+          "Extrahiere NUR das eigentliche Druckmotiv (Design) inklusive seiner jetzigen grafischen Elemente " +
+          "(Hintergrundfarbe, Brush-Rand, Text, Herzen etc.). " +
+          "ALLES, was aktuell Kissen, Sofa, Wand, Umgebung oder zusätzliche weiße Fläche ist, " +
+          "muss komplett TRANSPARENT werden. " +
+          "Das Ergebnis muss ein PNG mit Alphakanal sein, ohne zusätzliche weiße oder farbige Hintergründe. " +
+          "Es darf KEIN neuer weißer Rahmen oder Hintergrund hinzugefügt werden.",
+        size: "1024x1024",
       });
     } catch (err) {
       console.error("OpenAI-Fehler in /tote-preview:", {
@@ -121,14 +116,14 @@ app.get("/tote-preview", async (req, res) => {
         name: err.name,
         code: err.code,
         status: err.status,
-        response: err.response?.data
+        response: err.response?.data,
       });
 
       return res.status(500).json({
         error: "OpenAI-Fehler in /tote-preview",
         message: err.message,
         code: err.code,
-        status: err.status
+        status: err.status,
       });
     }
 
