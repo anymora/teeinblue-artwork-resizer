@@ -1,107 +1,110 @@
+// index.js
 import express from "express";
 import fetch from "node-fetch";
-import sharp from "sharp";
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 
 const app = express();
+const port = process.env.PORT || 8080;
 
-// OpenAI Client – API-Key kommt aus Railway Variable OPENAI_API_KEY
+// OpenAI-Client
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.OPENAI_API_KEY
 });
 
-// Fixe Tragetaschen-Vorlage
+// Dein Tragetaschen-Mockup (Hintergrundbild)
 const TOTE_MOCKUP_URL =
   "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/Tragetasche_Mockup.jpg?v=1763713012";
 
-// Bild von URL laden
-async function downloadImage(url) {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`Bild konnte nicht geladen werden: ${url} – Status ${res.status}`);
+/**
+ * Hilfsfunktion: Remote-Bild laden und in ein File für OpenAI konvertieren
+ */
+async function fetchAsFile(url, fileName) {
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(`Bild konnte nicht geladen werden: ${url} (Status ${resp.status})`);
   }
-  const arrBuf = await res.arrayBuffer();
-  return Buffer.from(arrBuf);
+  const arrayBuffer = await resp.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+
+  // toFile macht daraus ein gültiges "FileLike" Objekt
+  // WICHTIG: keine zusätzlichen Felder wie "name" oder "data" selbst bauen
+  const file = await toFile(buffer, fileName, {
+    type: "image/jpeg" // Shopify-Mockups sind i.d.R. JPG
+  });
+
+  return file;
 }
 
 /**
- * GET /tote-preview?url=<URL_DES_CUSTOMIZATION_IMAGE>
+ * GET /tote-preview?url=<URL_ZUM_KISSEN_MOCKUP>
  *
- * 1) Lädt das Kissen-Mockup (TeeInBlue _customization_image)
- * 2) Lässt GPT-Image-1 das reine Design als transparente PNG extrahieren
- * 3) Legt das extrahierte Design auf die Tragetasche
- * 4) Gibt das fertige Vorschaubild als PNG zurück
+ * 1. Holt das personalisierte Kissen-Mockup (Teeinblue _customization_image)
+ * 2. Holt das Tragetaschen-Mockup
+ * 3. Schickt beides an gpt-image-1 mit Prompt:
+ *    - Design vom Kissen extrahieren
+ *    - Auf die Tragetasche legen
+ * 4. Gibt eine Image-URL von OpenAI zurück
  */
 app.get("/tote-preview", async (req, res) => {
-  const { url } = req.query;
+  const sourceUrl = req.query.url;
 
-  if (!url) {
-    return res.status(400).json({ error: "Parameter ?url fehlt" });
+  if (!sourceUrl) {
+    return res
+      .status(400)
+      .json({ error: "Fehlender Parameter ?url=<LINK_ZUM_KISSEN_MOCKUP>" });
   }
 
   try {
-    // 1) Original-Kissen-Mockup laden
-    const cushionBuffer = await downloadImage(url);
+    console.log("Starte /tote-preview mit URL:", sourceUrl);
 
-    // 2) Design mit GPT-Image-1 aus dem Mockup extrahieren
-    //    Buffer als Datei deklarieren, damit das SDK weiß, dass es ein Bild ist
-    const cushionFile = Buffer.from(cushionBuffer);
-    cushionFile.name = "cushion_mockup.jpg";
+    // 1) Kissen-Mockup als File
+    const cushionFile = await fetchAsFile(sourceUrl, "cushion-mockup.jpg");
 
-    const aiResponse = await client.images.edit({
+    // 2) Tragetaschen-Mockup als File
+    const toteFile = await fetchAsFile(TOTE_MOCKUP_URL, "tote-mockup.jpg");
+
+    // 3) Beide Bilder an gpt-image-1 schicken
+    //    image[0] = Kissen (Quelle des Designs)
+    //    image[1] = Tragetasche (Ziel-Mockup)
+    const result = await client.images.edit({
       model: "gpt-image-1",
-      // ❗ FIX: KEIN Array, sondern EIN Feld "image"
-      image: cushionFile,
+      image: [cushionFile, toteFile],
       prompt:
-        "Das Bild zeigt ein Kissen-Mockup mit einem personalisierten Design. " +
-        "Extrahiere exakt dieses Design (Bild + Text) ohne den Kissen-Hintergrund " +
-        "und ohne das Design zu verändern. " +
-        "Gib nur das Design mit komplett transparentem Hintergrund als PNG zurück.",
-      size: "1024x1024",
-      n: 1,
-      response_format: "b64_json"
+        "Im ersten Bild ist ein personalisiertes Design auf einem Kissen zu sehen. " +
+        "Extrahiere EXAKT dieses komplette Design (inklusive Text, Farben, Schlagschatten usw.) " +
+        "transparent aus dem Kissen und platziere es perspektivisch korrekt und gut lesbar " +
+        "auf dem zweiten Bild auf der beigen Tragetasche in der Mitte. " +
+        "Hintergrund und Umgebung des zweiten Bildes (Holz, Wand, Haken, Blumen) bleiben erhalten. " +
+        "Nichts am Design verändern, nur sauber vom Kissen lösen und auf die Tragetasche legen.",
+      // Optional kannst du size/quality anpassen
+      size: "1024x1024"
     });
 
-    const designB64 = aiResponse.data[0].b64_json;
-    const designPngBuffer = Buffer.from(designB64, "base64");
+    if (!result || !result.data || !result.data[0] || !result.data[0].url) {
+      console.error("OpenAI Images-Antwort unerwartet:", result);
+      return res.status(500).json({
+        error: "OpenAI Images Antwort ohne URL zurückgegeben"
+      });
+    }
 
-    // 3) Tragetaschen-Mockup laden
-    const toteBuffer = await downloadImage(TOTE_MOCKUP_URL);
+    const imageUrl = result.data[0].url;
 
-    // 4) Design auf Tragetasche legen – Größe & Position kannst du nachjustieren
-    const resizedDesignBuffer = await sharp(designPngBuffer)
-      .resize({
-        width: 700,       // Breite des Designs auf der Tragetasche
-        fit: "contain",
-      })
-      .png()
-      .toBuffer();
-
-    const finalBuffer = await sharp(toteBuffer)
-      .composite([
-        {
-          input: resizedDesignBuffer,
-          // leicht nach unten und leicht nach links versetzt
-          left: 220,      // X-Offset
-          top: 260        // Y-Offset
-        }
-      ])
-      .png()
-      .toBuffer();
-
-    // 5) PNG direkt zurückgeben
-    res.setHeader("Content-Type", "image/png");
-    res.send(finalBuffer);
+    // 4) Einfach als JSON zurückgeben
+    res.json({ url: imageUrl });
   } catch (err) {
     console.error("Fehler in /tote-preview:", err);
     res.status(500).json({
       error: "Interner Fehler in /tote-preview",
-      detail: err.message
+      detail: String(err.message || err)
     });
   }
 });
 
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`Server läuft auf Port ${PORT}`);
+// Healthcheck
+app.get("/", (_req, res) => {
+  res.send("teeinblue-artwork-resizer läuft.");
+});
+
+app.listen(port, () => {
+  console.log(`Server läuft auf Port ${port}`);
 });
