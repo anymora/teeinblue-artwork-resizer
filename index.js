@@ -2,7 +2,7 @@
 import express from "express";
 import fetch from "node-fetch";
 import sharp from "sharp";
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 
 const app = express();
 
@@ -61,22 +61,20 @@ app.get("/tote-preview", async (req, res) => {
       .png()
       .toBuffer();
 
-    // *** WICHTIGER FIX ***
-    // Für das Node-SDK: Buffer direkt als "image" übergeben
-    // und nur die .name-Eigenschaft setzen.
-    const imageFile = squarePngBuffer;
-    // @ts-ignore – wir hängen der Buffer-Instanz ein name-Feld an
-    imageFile.name = "mockup.png";
+    // --- WICHTIG: korrektes File-Objekt für das OpenAI-SDK ---
+    const imageFile = await toFile(squarePngBuffer, "mockup.png", {
+      type: "image/png",
+    });
 
     // 3. OpenAI: Design aus dem Mockup freistellen
     const editResult = await openai.images.edit({
       model: "gpt-image-1",
-      image: imageFile, // KEIN { name: ..., data: ... } – direkt der Buffer!
+      image: imageFile, // jetzt echtes File-Objekt, kein image.name-Fehler mehr
       prompt:
         "Das Bild zeigt ein Produkt-Mockup mit einem Druckmotiv. " +
         "Extrahiere nur das Druckmotiv (Design) ohne Kissen, Sofa oder Hintergrund. " +
         "Gib ein quadratisches transparentes PNG zurück, auf dem nur das Motiv zu sehen ist.",
-      size: "1024x1024",
+      size: "1024x1024"
       // response_format weglassen, Default ist b64_json
     });
 
