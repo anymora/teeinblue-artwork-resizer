@@ -185,7 +185,7 @@ app.get("/tote-preview", async (req, res) => {
     // - etwas weiter nach links (0.26)
     // - etwas weiter nach unten (0.36)
     const offsetLeft = Math.round(toteMeta.width * 0.26);
-    const offsetTop = Math.round(toteMeta.height * 0.36);
+    const offsetTop = Math.round(toteMeta.height * 0.46);
 
     const finalBuffer = await toteSharp
       .composite([
