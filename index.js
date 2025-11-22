@@ -1,161 +1,136 @@
 // index.js
 import express from "express";
 import fetch from "node-fetch";
+import FormData from "form-data";
 import sharp from "sharp";
-import OpenAI, { toFile } from "openai";
 
 const app = express();
 
-// OpenAI-Client, liest deinen Key aus Railway-ENV OPENAI_API_KEY
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// remove.bg API-Key aus Railway-ENV
+const REMOVE_BG_API_KEY = process.env.REMOVE_BG_API_KEY;
 
-// Tote-Mockup (Hintergrund) – dein Shopify-Bild
+// Tragetaschen-Mockup (Hintergrund)
 const TOTE_MOCKUP_URL =
   "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/Tragetasche_Mockup.jpg?v=1763713012";
 
-// Einfacher In-Memory-Cache: sourceUrl -> fertiges PNG
-const previewCache = new Map(); // key: sourceUrl, value: Buffer
+// Einfacher In-Memory-Cache: artworkUrl -> fertiges PNG
+const previewCache = new Map(); // key: artworkUrl, value: Buffer
 
 // Healthcheck
 app.get("/", (req, res) => {
-  res.send("teeinblue-artwork-resizer läuft.");
+  res.send("teeinblue-artwork-resizer (remove.bg Version) läuft.");
 });
 
 /**
- * Debug-Route: prüft NUR, ob der Server OpenAI überhaupt erreicht.
- * GET /test-openai
+ * Debug-Route: testet nur remove.bg-Konnektivität
+ * GET /test-removebg?url=<IMAGE_URL>
  */
-app.get("/test-openai", async (req, res) => {
+app.get("/test-removebg", async (req, res) => {
   try {
-    const models = await openai.images.generate({
-      model: "gpt-image-1",
-      prompt: "test",
-      size: "1024x1024",
+    if (!REMOVE_BG_API_KEY) {
+      return res.status(500).json({ error: "REMOVE_BG_API_KEY ist nicht gesetzt." });
+    }
+
+    const testUrl = req.query.url;
+    if (!testUrl) {
+      return res
+        .status(400)
+        .json({ error: "Bitte ?url=<IMAGE_URL> angeben, um remove.bg zu testen." });
+    }
+
+    const formData = new FormData();
+    formData.append("image_url", testUrl);
+    formData.append("size", "auto");
+    formData.append("type", "product"); // Hinweis an remove.bg: Produkt-Motiv im Fokus
+
+    const r = await fetch("https://api.remove.bg/v1.0/removebg", {
+      method: "POST",
+      headers: {
+        "X-Api-Key": REMOVE_BG_API_KEY
+      },
+      body: formData
     });
 
-    res.json({
-      ok: true,
-      info: "OpenAI erreichbar",
-      type: typeof models,
-    });
+    if (!r.ok) {
+      const txt = await r.text();
+      console.error("remove.bg Fehler:", r.status, txt);
+      return res.status(500).json({
+        error: "remove.bg Request fehlgeschlagen",
+        status: r.status,
+        body: txt
+      });
+    }
+
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.setHeader("Content-Type", "image/png");
+    res.send(buf);
   } catch (err) {
-    console.error("Fehler in /test-openai:", {
-      message: err.message,
-      name: err.name,
-      code: err.code,
-      status: err.status,
-      response: err.response?.data,
-    });
-
-    res.status(500).json({
-      error: "Fehler in /test-openai",
-      message: err.message,
-      name: err.name,
-      code: err.code,
-      status: err.status,
-    });
+    console.error("Fehler in /test-removebg:", err);
+    res.status(500).json({ error: "Interner Fehler in /test-removebg", detail: String(err.message || err) });
   }
 });
 
 /**
- * GET /tote-preview?url=<URL_DES_KISSEN_MOCKUPS>
+ * GET /tote-preview?url=<URL_DES_ARTWORK-BILDES>
+ *
+ * Erwartet: Ein Bild, bei dem das Design im Vordergrund steht (z.B. 2. Produktbild / Artwork),
+ * remove.bg entfernt den Hintergrund → wir legen das Motiv auf die Tragetasche.
  */
 app.get("/tote-preview", async (req, res) => {
-  const sourceUrl = req.query.url;
+  const artworkUrl = req.query.url;
 
-  if (!sourceUrl || typeof sourceUrl !== "string") {
+  if (!artworkUrl || typeof artworkUrl !== "string") {
     return res
       .status(400)
       .json({ error: "Parameter 'url' fehlt oder ist ungültig." });
   }
 
-  // 0. Cache-Hit? -> sofort zurück
-  if (previewCache.has(sourceUrl)) {
-    const cachedBuffer = previewCache.get(sourceUrl);
+  if (!REMOVE_BG_API_KEY) {
+    return res.status(500).json({ error: "REMOVE_BG_API_KEY ist nicht gesetzt." });
+  }
+
+  // 0. Cache-Hit? -> sofort zurück (zweiter Aufruf für dasselbe Design ist dann sofort)
+  if (previewCache.has(artworkUrl)) {
+    const cachedBuffer = previewCache.get(artworkUrl);
     res.setHeader("Content-Type", "image/png");
     return res.send(cachedBuffer);
   }
 
   try {
-    // 1. Mockup vom Kunden (z.B. Kopfkissen) laden
-    const srcResp = await fetch(sourceUrl);
-    if (!srcResp.ok) {
-      return res.status(400).json({
-        error: "Konnte Quellbild nicht laden.",
-        detail: `HTTP ${srcResp.status}`,
-      });
-    }
-    const srcArrayBuf = await srcResp.arrayBuffer();
-    const srcBuffer = Buffer.from(srcArrayBuf);
+    // 1. remove.bg aufrufen, um Hintergrund aus dem Artwork zu entfernen
+    const formData = new FormData();
+    formData.append("image_url", artworkUrl);
+    formData.append("size", "auto");     // beste Qualität automatisch
+    formData.append("type", "product");  // sagt remove.bg: es ist ein Produkt, nicht Person
 
-    // 2. In quadratisches PNG bringen – 1024x1024 (Pflichtgröße für gpt-image-1)
-    const WORK_SIZE = 1024;
-
-    const squarePngBuffer = await sharp(srcBuffer)
-      .resize(WORK_SIZE, WORK_SIZE, {
-        fit: "contain",
-        background: { r: 0, g: 0, b: 0, alpha: 0 },
-        fastShrinkOnLoad: true,
-      })
-      .ensureAlpha()
-      .png()
-      .toBuffer();
-
-    // File-Objekt für OpenAI bauen
-    const imageFile = await toFile(squarePngBuffer, "mockup.png", {
-      type: "image/png",
+    const rbgResp = await fetch("https://api.remove.bg/v1.0/removebg", {
+      method: "POST",
+      headers: {
+        "X-Api-Key": REMOVE_BG_API_KEY
+      },
+      body: formData
     });
 
-    // 3. OpenAI: Design aus dem Mockup freistellen – mit ECHTEM Alphakanal
-    let editResult;
-    try {
-      editResult = await openai.images.edit({
-        model: "gpt-image-1",
-        image: imageFile,
-        prompt:
-          "Das Bild zeigt ein Produkt-Mockup mit einem Druckmotiv auf einem Kissen. " +
-          "Extrahiere NUR das eigentliche Druckmotiv (Design) inklusive aller grafischen Elemente " +
-          "(Hintergrundfarbe, Brush-Rand, Text, Herzen etc.). " +
-          "Der Hintergrund außerhalb des Motivs muss vollständig transparent sein (Alphakanal = 0). " +
-          "ERZEUGE KEIN kariertes Muster, KEINE grauen/weißen Kacheln und KEINE grafische Darstellung von Transparenz. " +
-          "Zeige an den transparenten Stellen einfach gar nichts, kein zusätzliches Weiß oder Grau. " +
-          "Das Ergebnis muss ein PNG mit Alphakanal sein und darf keinen sichtbaren Rahmen oder rechteckige Hintergrundfläche haben.",
-        size: "1024x1024",
-      });
-    } catch (err) {
-      console.error("OpenAI-Fehler in /tote-preview:", {
-        message: err.message,
-        name: err.name,
-        code: err.code,
-        status: err.status,
-        response: err.response?.data,
-      });
-
+    if (!rbgResp.ok) {
+      const txt = await rbgResp.text();
+      console.error("remove.bg Fehler:", rbgResp.status, txt);
       return res.status(500).json({
-        error: "OpenAI-Fehler in /tote-preview",
-        message: err.message,
-        code: err.code,
-        status: err.status,
+        error: "remove.bg Request fehlgeschlagen",
+        status: rbgResp.status,
+        body: txt
       });
     }
 
-    const designB64 = editResult.data[0].b64_json;
-    if (!designB64) {
-      return res
-        .status(500)
-        .json({ error: "OpenAI hat kein Bild zurückgegeben." });
-    }
-    let designPngBuffer = Buffer.from(designB64, "base64");
+    const noBgArrayBuf = await rbgResp.arrayBuffer();
+    let designPngBuffer = Buffer.from(noBgArrayBuf);
 
-    // Sicherheit: sicherstellen, dass wir einen Alphakanal haben
+    // Sicherheit: PNG + Alphakanal
     designPngBuffer = await sharp(designPngBuffer)
       .ensureAlpha()
       .png()
       .toBuffer();
 
-    // 4. Tragetaschen-Mockup laden
+    // 2. Tragetaschen-Mockup laden
     const toteResp = await fetch(TOTE_MOCKUP_URL);
     if (!toteResp.ok) {
       return res.status(500).json({
@@ -175,17 +150,20 @@ app.get("/tote-preview", async (req, res) => {
         .json({ error: "Konnte Größe des Tragetaschen-Mockups nicht lesen." });
     }
 
-    // Design skalieren (Breite ~45% der Tasche)
+    // 3. Design skalieren (Breite ~45% der Tasche)
     const designOnToteBuffer = await sharp(designPngBuffer)
-      .resize(Math.round(toteMeta.width * 0.45))
+      .resize(Math.round(toteMeta.width * 0.45), null, {
+        fit: "inside",
+        fastShrinkOnLoad: true
+      })
       .png()
       .toBuffer();
 
-    // Position auf der Tasche:
+    // 4. Position auf der Tasche:
     // - etwas weiter nach links (0.26)
     // - etwas weiter nach unten (0.36)
     const offsetLeft = Math.round(toteMeta.width * 0.26);
-    const offsetTop = Math.round(toteMeta.height * 0.46);
+    const offsetTop = Math.round(toteMeta.height * 0.36);
 
     const finalBuffer = await toteSharp
       .composite([
@@ -198,10 +176,10 @@ app.get("/tote-preview", async (req, res) => {
       .png()
       .toBuffer();
 
-    // In Cache legen (für zukünftige Aufrufe mit gleicher URL)
-    previewCache.set(sourceUrl, finalBuffer);
+    // 5. In Cache legen (für zukünftige Aufrufe mit gleicher URL)
+    previewCache.set(artworkUrl, finalBuffer);
 
-    // 5. Fertiges Bild zurückgeben
+    // 6. Fertiges Bild zurückgeben
     res.setHeader("Content-Type", "image/png");
     res.send(finalBuffer);
   } catch (err) {
