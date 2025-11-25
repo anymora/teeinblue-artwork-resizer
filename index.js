@@ -270,18 +270,18 @@ app.get("/tote-preview", async (req, res) => {
         .json({ error: "Konnte Größe des Tragetaschen-Mockups nicht lesen." });
     }
 
-    // 4. Artwork skalieren (Breite ~45% der Tasche)
+    // 4. Artwork skalieren (Breite ~42% der Tasche)
     const designOnToteBuffer = await sharp(transparentArtBuffer)
-      .resize(Math.round(toteMeta.width * 0.45), null, {
+      .resize(Math.round(toteMeta.width * 0.42), null, {
         fit: "inside",
         fastShrinkOnLoad: true,
       })
       .png()
       .toBuffer();
 
-    // Position auf der Tasche (wie gehabt)
+    // Position auf der Tasche
     const offsetLeft = Math.round(toteMeta.width * 0.26);
-    const offsetTop = Math.round(toteMeta.height * 0.36);
+    const offsetTop = Math.round(toteMeta.height * 0.46);
 
     const finalBuffer = await toteSharp
       .composite([
