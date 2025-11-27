@@ -5,243 +5,155 @@ import sharp from "sharp";
 
 const app = express();
 
-// Mockups
+// User-Agent, damit Shopify-CDN nicht rumzickt
+const SHOPIFY_FETCH_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+  Accept: "image/avif,image/webp,image/png,image/*,*/*",
+};
+
+// Mockup-URLs
 const TOTE_MOCKUP_URL =
   "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/Tragetasche_Mockup.jpg?v=1763713012";
 
 const MUG_MOCKUP_URL =
   "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/IMG_1833.jpg?v=1764169061";
 
-// Cache
+// In-Memory Cache: key -> Buffer (PNG)
 const previewCache = new Map();
 
-// Health Check
+// Healthcheck
 app.get("/", (req, res) => {
-  res.send("AI Artwork Extractor läuft (Transparent-Version).");
+  res.send("teeinblue-artwork-resizer (ohne BG-Removal, Tasche + Tasse) läuft.");
 });
 
-/* -------------------------------------------------------
-   Hilfsfunktion: Farbdistanz
-------------------------------------------------------- */
-function colorDist(c1, c2) {
-  const dr = c1[0] - c2[0];
-  const dg = c1[1] - c2[1];
-  const db = c1[2] - c2[2];
-  return Math.sqrt(dr * dr + dg * dg + db * db);
+// --------------------------------------------------
+// Hilfsfunktion: Bild von URL laden
+// --------------------------------------------------
+async function loadImage(url) {
+  const resp = await fetch(url, { headers: SHOPIFY_FETCH_HEADERS });
+  if (!resp.ok) {
+    throw new Error(`Bild konnte nicht geladen werden: ${url} (HTTP ${resp.status})`);
+  }
+  const buf = Buffer.from(await resp.arrayBuffer());
+  return buf;
 }
 
-/* -------------------------------------------------------
-   HINTERGRUND ENTFERNEN (Flood-Fill)
-------------------------------------------------------- */
-async function removeBackgroundFloodFill(inputBuffer) {
-  const img = sharp(inputBuffer).ensureAlpha();
-  const meta = await img.metadata();
-
-  const { width, height } = meta;
-  if (!width || !height) throw new Error("Ungültige Bildgröße");
-
-  const raw = await img.raw().toBuffer();
-  const samples = [];
-
-  function sample(x, y) {
-    const i = (y * width + x) * 4;
-    const a = raw[i + 3];
-    if (a === 0) return;
-    samples.push([raw[i], raw[i + 1], raw[i + 2]]);
-  }
-
-  // Rand abtasten
-  for (let x = 0; x < width; x += Math.max(1, width / 50)) {
-    sample(x, 0);
-    sample(x, height - 1);
-  }
-  for (let y = 0; y < height; y += Math.max(1, height / 50)) {
-    sample(0, y);
-    sample(width - 1, y);
-  }
-
-  if (samples.length === 0) return inputBuffer;
-
-  // Clustern
-  const clusters = [];
-  const maxDist = 25;
-
-  for (const col of samples) {
-    let found = false;
-    for (const cl of clusters) {
-      if (colorDist(col, cl.color) < maxDist) {
-        cl.count++;
-        cl.color = [
-          (cl.color[0] * (cl.count - 1) + col[0]) / cl.count,
-          (cl.color[1] * (cl.count - 1) + col[1]) / cl.count,
-          (cl.color[2] * (cl.count - 1) + col[2]) / cl.count,
-        ];
-        found = true;
-        break;
-      }
-    }
-    if (!found) clusters.push({ color: [...col], count: 1 });
-  }
-
-  clusters.sort((a, b) => b.count - a.count);
-  const bgColors = clusters.slice(0, 3).map((c) => c.color);
-
-  const visited = new Uint8Array(width * height);
-  const queue = [];
-
-  function matchBg(r, g, b, tol) {
-    return bgColors.some((c) => colorDist([r, g, b], c) < tol);
-  }
-
-  function enqueue(x, y, tol) {
-    if (x < 0 || y < 0 || x >= width || y >= height) return;
-    const idx = y * width + x;
-    if (visited[idx]) return;
-
-    const p = idx * 4;
-    const r = raw[p];
-    const g = raw[p + 1];
-    const b = raw[p + 2];
-    const a = raw[p + 3];
-
-    if (a === 0 || matchBg(r, g, b, tol)) {
-      visited[idx] = 1;
-      queue.push([x, y]);
-    }
-  }
-
-  // Startpunkte Rand
-  for (let x = 0; x < width; x++) {
-    enqueue(x, 0, 26);
-    enqueue(x, height - 1, 26);
-  }
-  for (let y = 0; y < height; y++) {
-    enqueue(0, y, 26);
-    enqueue(width - 1, y, 26);
-  }
-
-  // Flood-Fill
-  while (queue.length) {
-    const [cx, cy] = queue.pop();
-    const nb = [
-      [cx - 1, cy],
-      [cx + 1, cy],
-      [cx, cy - 1],
-      [cx, cy + 1],
-    ];
-    for (const [nx, ny] of nb) {
-      enqueue(nx, ny, 30);
-    }
-  }
-
-  // Transparenz setzen
-  for (let i = 0; i < width * height; i++) {
-    if (visited[i]) raw[i * 4 + 3] = 0;
-  }
-
-  return sharp(raw, { raw: { width, height, channels: 4 } })
-    .png()
-    .toBuffer();
-}
-
-/* -------------------------------------------------------
-   GENERISCHE FUNKTION:
-   Artwork auf Mockup platzieren
-------------------------------------------------------- */
-async function makePreview(artUrl, mockupUrl, scale, offsetX, offsetY) {
+// --------------------------------------------------
+// Artwork direkt auf Mockup legen (ohne BG-Entfernung)
+// --------------------------------------------------
+async function placeArtworkOnMockup(artworkUrl, mockupUrl, scale, offsetX, offsetY) {
   // Artwork laden
-  const a = await fetch(artUrl);
-  const ab = Buffer.from(await a.arrayBuffer());
-
-  // Transparenz erzeugen
-  let artTransparent;
-  try {
-    artTransparent = await removeBackgroundFloodFill(ab);
-  } catch {
-    artTransparent = await sharp(ab).ensureAlpha().png().toBuffer();
-  }
+  const artBuf = await loadImage(artworkUrl);
+  // Sicherstellen, dass wir ein PNG mit Alpha haben (falls wir später doch Transparenz haben wollen)
+  const artPng = await sharp(artBuf).ensureAlpha().png().toBuffer();
 
   // Mockup laden
-  const m = await fetch(mockupUrl);
-  const mb = Buffer.from(await m.arrayBuffer());
+  const mockBuf = await loadImage(mockupUrl);
+  const mockSharp = sharp(mockBuf);
+  const meta = await mockSharp.metadata();
+  if (!meta.width || !meta.height) {
+    throw new Error("Konnte Mockup-Abmessungen nicht lesen.");
+  }
 
-  const mSharp = sharp(mb);
-  const meta = await mSharp.metadata();
-
-  // Artwork skalieren
-  const scaled = await sharp(artTransparent)
-    .resize(Math.round(meta.width * scale), null, { fit: "inside" })
+  // Artwork skalieren (Breite = scale * Mockup-Breite)
+  const scaledArt = await sharp(artPng)
+    .resize(Math.round(meta.width * scale), null, {
+      fit: "inside",
+      fastShrinkOnLoad: true,
+    })
     .png()
     .toBuffer();
 
-  // Auf Mockup legen
-  return mSharp
-    .composite([{ input: scaled, left: meta.width * offsetX, top: meta.height * offsetY }])
+  const left = Math.round(meta.width * offsetX);
+  const top = Math.round(meta.height * offsetY);
+
+  // Artwork auf Mockup kompositen
+  const finalBuffer = await mockSharp
+    .composite([{ input: scaledArt, left, top }])
     .png()
     .toBuffer();
+
+  return finalBuffer;
 }
 
-/* -------------------------------------------------------
-   ENDPOINT: Tragetasche
-------------------------------------------------------- */
+// --------------------------------------------------
+// /tote-preview – Artwork auf Tragetasche
+// --------------------------------------------------
 app.get("/tote-preview", async (req, res) => {
-  const url = req.query.url;
-  if (!url) return res.status(400).json({ error: "url fehlt" });
+  const artworkUrl = req.query.url;
+  if (!artworkUrl || typeof artworkUrl !== "string") {
+    return res.status(400).json({ error: "Parameter 'url' fehlt oder ist ungültig." });
+  }
 
-  if (previewCache.has("TOTE_" + url)) {
+  const cacheKey = "TOTE_" + artworkUrl;
+  if (previewCache.has(cacheKey)) {
     res.setHeader("Content-Type", "image/png");
-    return res.send(previewCache.get("TOTE_" + url));
+    return res.send(previewCache.get(cacheKey));
   }
 
   try {
-    const result = await makePreview(
-      url,
+    // Skala und Position wie bei der Transparent-Variante
+    const finalPng = await placeArtworkOnMockup(
+      artworkUrl,
       TOTE_MOCKUP_URL,
-      0.42, // Größe
-      0.26, // X
-      0.46 // Y
+      0.42, // 42 % der Breite der Tasche
+      0.26, // etwas links
+      0.46  // etwas tiefer
     );
 
-    previewCache.set("TOTE_" + url, result);
+    previewCache.set(cacheKey, finalPng);
     res.setHeader("Content-Type", "image/png");
-    res.send(result);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Fehler bei Tasche" });
+    res.send(finalPng);
+  } catch (err) {
+    console.error("Fehler in /tote-preview (no-bg):", err);
+    res.status(500).json({
+      error: "Interner Fehler in /tote-preview (no-bg)",
+      detail: err.message || String(err),
+    });
   }
 });
 
-/* -------------------------------------------------------
-   ENDPOINT: Tasse
-------------------------------------------------------- */
+// --------------------------------------------------
+// /mug-preview – Artwork auf Tasse
+// --------------------------------------------------
 app.get("/mug-preview", async (req, res) => {
-  const url = req.query.url;
-  if (!url) return res.status(400).json({ error: "url fehlt" });
+  const artworkUrl = req.query.url;
+  if (!artworkUrl || typeof artworkUrl !== "string") {
+    return res.status(400).json({ error: "Parameter 'url' fehlt oder ist ungültig." });
+  }
 
-  if (previewCache.has("MUG_" + url)) {
+  const cacheKey = "MUG_" + artworkUrl;
+  if (previewCache.has(cacheKey)) {
     res.setHeader("Content-Type", "image/png");
-    return res.send(previewCache.get("MUG_" + url));
+    return res.send(previewCache.get(cacheKey));
   }
 
   try {
-    const result = await makePreview(
-      url,
+    // Skala & Position für Tasse (kleiner, zentriert vorne)
+    const finalPng = await placeArtworkOnMockup(
+      artworkUrl,
       MUG_MOCKUP_URL,
-      0.26, // kleiner für Tasse
-      0.37,
-      0.38
+      0.26, // ~26 % der Breite der Tasse
+      0.37, // etwas rechts der Mitte
+      0.38  // etwas unterhalb der Mitte
     );
 
-    previewCache.set("MUG_" + url, result);
+    previewCache.set(cacheKey, finalPng);
     res.setHeader("Content-Type", "image/png");
-    res.send(result);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Fehler bei Tasse" });
+    res.send(finalPng);
+  } catch (err) {
+    console.error("Fehler in /mug-preview (no-bg):", err);
+    res.status(500).json({
+      error: "Interner Fehler in /mug-preview (no-bg)",
+      detail: err.message || String(err),
+    });
   }
 });
 
-// Start
+// --------------------------------------------------
+// Serverstart
+// --------------------------------------------------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log("Server läuft auf Port " + PORT);
