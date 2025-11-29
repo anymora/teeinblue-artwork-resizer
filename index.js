@@ -5,7 +5,7 @@ import sharp from "sharp";
 
 const app = express();
 
-// Shopify CDN mag einen Browser-User-Agent lieber
+// Shopify CDN mag Browser-User-Agent
 const SHOPIFY_FETCH_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
@@ -19,7 +19,7 @@ const TOTE_MOCKUP_URL =
 const MUG_MOCKUP_URL =
   "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/IMG_1833.jpg?v=1764169061";
 
-// In-Memory-Cache
+// Cache: artworkUrl + type -> fertiges PNG
 const previewCache = new Map();
 
 // Healthcheck
@@ -27,21 +27,16 @@ app.get("/", (req, res) => {
   res.send("teeinblue-artwork-resizer (BG-Removal + Tasche + Tasse) läuft.");
 });
 
-// --------------------------------------------------
-// Hilfsfunktion: Bild von URL laden
-// --------------------------------------------------
+// --------------------- Hilfsfunktionen ---------------------
+
 async function loadImage(url) {
   const resp = await fetch(url, { headers: SHOPIFY_FETCH_HEADERS });
   if (!resp.ok) {
     throw new Error(`Bild konnte nicht geladen werden: ${url} (HTTP ${resp.status})`);
   }
-  const buf = Buffer.from(await resp.arrayBuffer());
-  return buf;
+  return Buffer.from(await resp.arrayBuffer());
 }
 
-// --------------------------------------------------
-// Farb-Distanz
-// --------------------------------------------------
 function colorDist(c1, c2) {
   const dr = c1[0] - c2[0];
   const dg = c1[1] - c2[1];
@@ -50,24 +45,19 @@ function colorDist(c1, c2) {
 }
 
 function brightness(c) {
-  return (c[0] + c[1] + c[2]) / 3; // 0..255
+  return (c[0] + c[1] + c[2]) / 3;
 }
 
-// --------------------------------------------------
-// Hintergrund entfernen (nur heller Rand → transparent)
-// --------------------------------------------------
+// Nur heller Randhintergrund → transparent machen
 async function removeBackgroundFloodFill(inputBuffer) {
   const img = sharp(inputBuffer).ensureAlpha();
   const meta = await img.metadata();
   const { width, height } = meta;
 
-  if (!width || !height) {
-    throw new Error("Konnte Bildgröße nicht bestimmen.");
-  }
+  if (!width || !height) throw new Error("Ungültige Bildgröße");
 
-  const raw = await img.raw().toBuffer(); // [r,g,b,a, r,g,b,a, ...]
+  const raw = await img.raw().toBuffer(); // [r,g,b,a, ...]
 
-  // 1. Randpixel sampeln → Hintergrundfarben clustern
   const samples = [];
   const stepX = Math.max(1, Math.floor(width / 50));
   const stepY = Math.max(1, Math.floor(height / 50));
@@ -78,30 +68,24 @@ async function removeBackgroundFloodFill(inputBuffer) {
     const g = raw[idx + 1];
     const b = raw[idx + 2];
     const a = raw[idx + 3];
-    if (a > 0) {
-      samples.push([r, g, b]);
-    }
+    if (a > 0) samples.push([r, g, b]);
   }
 
-  // obere/untere Kante
+  // Rand abtasten
   for (let x = 0; x < width; x += stepX) {
     samplePixelAt(x, 0);
     samplePixelAt(x, height - 1);
   }
-  // linke/rechte Kante
   for (let y = 0; y < height; y += stepY) {
     samplePixelAt(0, y);
     samplePixelAt(width - 1, y);
   }
 
-  if (samples.length === 0) {
-    // nichts erkannt → Original zurück
-    return inputBuffer;
-  }
+  if (!samples.length) return inputBuffer;
 
-  // 2. Clustern
+  // Cluster bilden
   const clusters = [];
-  const maxClusterDist = 25; // Farbabstand
+  const maxClusterDist = 25;
 
   for (const col of samples) {
     let found = false;
@@ -115,36 +99,29 @@ async function removeBackgroundFloodFill(inputBuffer) {
         break;
       }
     }
-    if (!found) {
-      clusters.push({ color: [...col], count: 1 });
-    }
+    if (!found) clusters.push({ color: [...col], count: 1 });
   }
 
   clusters.sort((a, b) => b.count - a.count);
 
-  // NUR sehr helle Cluster als Hintergrund akzeptieren
-  // → verhindert, dass „innere“ weiße Bereiche weggefressen werden.
+  // Nur sehr helle Randfarben als Hintergrund zulassen
   const bgColors = clusters
-    .filter((c) => brightness(c.color) > 200) // hell genug
+    .filter((c) => brightness(c.color) > 200)
     .slice(0, 3)
     .map((c) => c.color);
 
-  if (bgColors.length === 0) {
-    // Kein klarer heller Hintergrund erkannt → Original zurück
+  if (!bgColors.length) {
+    // kein klarer heller Randhintergrund -> Original zurück
     return inputBuffer;
   }
 
-  // 3. Flood-Fill vom Rand
-  const visited = new Uint8Array(width * height); // 0 = nicht besucht, 1 = Hintergrund
+  const visited = new Uint8Array(width * height);
   const queue = [];
-  const bgTolStart = 24; // eher streng am Rand
-  const bgTolGrow = 28; // etwas großzügiger ins Innere
+  const TOL_START = 24;
+  const TOL_GROW = 28;
 
   function isBgColor(r, g, b, tol) {
-    for (const bg of bgColors) {
-      if (colorDist([r, g, b], bg) < tol) return true;
-    }
-    return false;
+    return bgColors.some((bg) => colorDist([r, g, b], bg) < tol);
   }
 
   function tryEnqueue(x, y, tol) {
@@ -164,27 +141,25 @@ async function removeBackgroundFloodFill(inputBuffer) {
       return;
     }
 
-    // nur helle Hintergründe erlauben
     if (brightness([r, g, b]) > 200 && isBgColor(r, g, b, tol)) {
       visited[idxPix] = 1;
       queue.push([x, y]);
     }
   }
 
-  // Startpunkte Rand
+  // Start vom Rand
   for (let x = 0; x < width; x++) {
-    tryEnqueue(x, 0, bgTolStart);
-    tryEnqueue(x, height - 1, bgTolStart);
+    tryEnqueue(x, 0, TOL_START);
+    tryEnqueue(x, height - 1, TOL_START);
   }
   for (let y = 0; y < height; y++) {
-    tryEnqueue(0, y, bgTolStart);
-    tryEnqueue(width - 1, y, bgTolStart);
+    tryEnqueue(0, y, TOL_START);
+    tryEnqueue(width - 1, y, TOL_START);
   }
 
-  // BFS/DFS
-  while (queue.length > 0) {
+  // Flood-Fill
+  while (queue.length) {
     const [cx, cy] = queue.pop();
-
     const neighbors = [
       [cx - 1, cy],
       [cx + 1, cy],
@@ -204,7 +179,7 @@ async function removeBackgroundFloodFill(inputBuffer) {
 
       if (
         a === 0 ||
-        (brightness([r, g, b]) > 200 && isBgColor(r, g, b, bgTolGrow))
+        (brightness([r, g, b]) > 200 && isBgColor(r, g, b, TOL_GROW))
       ) {
         visited[idxPix] = 1;
         queue.push([nx, ny]);
@@ -212,78 +187,69 @@ async function removeBackgroundFloodFill(inputBuffer) {
     }
   }
 
-  // 4. Alle als Hintergrund markierten Pixel transparent machen
+  // Hintergrund-Pixel transparent setzen
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idxPix = y * width + x;
       if (visited[idxPix]) {
         const idx = idxPix * 4;
-        raw[idx + 3] = 0; // alpha = 0
+        raw[idx + 3] = 0;
       }
     }
   }
 
-  const outBuffer = await sharp(raw, {
-    raw: {
-      width,
-      height,
-      channels: 4,
-    },
+  return sharp(raw, {
+    raw: { width, height, channels: 4 },
   })
     .png()
     .toBuffer();
-
-  return outBuffer;
 }
 
-// --------------------------------------------------
-// Generische Funktion: Artwork transparent + Mockup
-// --------------------------------------------------
-async function makePreviewWithBgRemoval(artworkUrl, mockupUrl, scale, offsetX, offsetY) {
+// transparentes Artwork + Mockup → PNG
+async function makePreviewWithBgRemoval({ artworkUrl, mockupUrl, scale, offsetX, offsetY }) {
   // Artwork laden
-  const artRespBuf = await loadImage(artworkUrl);
+  const artBuf = await loadImage(artworkUrl);
 
-  // Hintergrund entfernen – bei Fehler Original als PNG mit Alpha
-  let transparentArt;
+  // Hintergrund entfernen; wenn das schiefgeht, trotzdem PNG mit Alpha verwenden
+  let artTransparent;
   try {
-    transparentArt = await removeBackgroundFloodFill(artRespBuf);
+    artTransparent = await removeBackgroundFloodFill(artBuf);
   } catch (err) {
-    console.error("BG-Removal Fehler, benutze Original:", err);
-    transparentArt = await sharp(artRespBuf).ensureAlpha().png().toBuffer();
+    console.error("BG-Removal Fehler, verwende Original mit Alpha:", err);
+    artTransparent = await sharp(artBuf).ensureAlpha().png().toBuffer();
   }
 
   // Mockup laden
   const mockBuf = await loadImage(mockupUrl);
   const mockSharp = sharp(mockBuf);
-  const mockMeta = await mockSharp.metadata();
-
-  if (!mockMeta.width || !mockMeta.height) {
+  const meta = await mockSharp.metadata();
+  if (!meta.width || !meta.height) {
     throw new Error("Konnte Mockup-Größe nicht lesen.");
   }
 
   // Artwork skalieren
-  const designBuf = await sharp(transparentArt)
-    .resize(Math.round(mockMeta.width * scale), null, {
+  const scaled = await sharp(artTransparent)
+    .resize(Math.round(meta.width * scale), null, {
       fit: "inside",
       fastShrinkOnLoad: true,
     })
     .png()
     .toBuffer();
 
-  const left = Math.round(mockMeta.width * offsetX);
-  const top = Math.round(mockMeta.height * offsetY);
+  const left = Math.round(meta.width * offsetX);
+  const top = Math.round(meta.height * offsetY);
 
+  // Artwork auf Mockup compositen
   const finalBuf = await mockSharp
-    .composite([{ input: designBuf, left, top }])
+    .composite([{ input: scaled, left, top }])
     .png()
     .toBuffer();
 
   return finalBuf;
 }
 
-// --------------------------------------------------
-// /tote-preview – Tasche mit freigestelltem Artwork
-// --------------------------------------------------
+// --------------------- Tote Endpoint ---------------------
+
 app.get("/tote-preview", async (req, res) => {
   const artworkUrl = req.query.url;
   if (!artworkUrl || typeof artworkUrl !== "string") {
@@ -297,29 +263,28 @@ app.get("/tote-preview", async (req, res) => {
   }
 
   try {
-    const finalBuffer = await makePreviewWithBgRemoval(
+    const finalBuffer = await makePreviewWithBgRemoval({
       artworkUrl,
-      TOTE_MOCKUP_URL,
-      0.42, // Größe auf Tasche
-      0.26, // X-Offset
-      0.46  // Y-Offset
-    );
+      mockupUrl: TOTE_MOCKUP_URL,
+      scale: 0.42,   // Größe auf Tasche
+      offsetX: 0.26, // etwas nach links
+      offsetY: 0.46, // etwas nach unten
+    });
 
     previewCache.set(cacheKey, finalBuffer);
     res.setHeader("Content-Type", "image/png");
     res.send(finalBuffer);
   } catch (err) {
     console.error("Fehler in /tote-preview:", err);
-    return res.status(500).json({
+    res.status(500).json({
       error: "Interner Fehler in /tote-preview",
       detail: err.message || String(err),
     });
   }
 });
 
-// --------------------------------------------------
-// /mug-preview – Tasse mit freigestelltem Artwork
-// --------------------------------------------------
+// --------------------- Mug Endpoint ---------------------
+
 app.get("/mug-preview", async (req, res) => {
   const artworkUrl = req.query.url;
   if (!artworkUrl || typeof artworkUrl !== "string") {
@@ -333,29 +298,28 @@ app.get("/mug-preview", async (req, res) => {
   }
 
   try {
-    const finalBuffer = await makePreviewWithBgRemoval(
+    const finalBuffer = await makePreviewWithBgRemoval({
       artworkUrl,
-      MUG_MOCKUP_URL,
-      0.325, // 25% größer als vorher (0.26 → 0.325)
-      0.35,  // leicht angepasst, damit es trotz größer noch mittig sitzt
-      0.37
-    );
+      mockupUrl: MUG_MOCKUP_URL,
+      scale: 0.325,  // 25% größer als >0.26
+      offsetX: 0.35, // etwas nach rechts
+      offsetY: 0.37, // etwas nach unten
+    });
 
     previewCache.set(cacheKey, finalBuffer);
     res.setHeader("Content-Type", "image/png");
     res.send(finalBuffer);
   } catch (err) {
     console.error("Fehler in /mug-preview:", err);
-    return res.status(500).json({
+    res.status(500).json({
       error: "Interner Fehler in /mug-preview",
       detail: err.message || String(err),
     });
   }
 });
 
-// --------------------------------------------------
-// Serverstart
-// --------------------------------------------------
+// --------------------- Serverstart ---------------------
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log("Server läuft auf Port " + PORT);
