@@ -303,7 +303,7 @@ app.get("/mug-preview", async (req, res) => {
       mockupUrl: MUG_MOCKUP_URL,
       scale: 0.325,  // 25% größer als >0.26
       offsetX: 0.35, // etwas nach rechts
-      offsetY: 0.37, // etwas nach unten
+      offsetY: 0.39, // etwas nach unten
     });
 
     previewCache.set(cacheKey, finalBuffer);
