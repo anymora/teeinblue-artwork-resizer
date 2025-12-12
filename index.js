@@ -12,12 +12,26 @@ const SHOPIFY_FETCH_HEADERS = {
   Accept: "image/avif,image/webp,image/png,image/*,*/*",
 };
 
-// Mockups
+// Mockups (aktualisiert wie im zweiten Backend)
 const TOTE_MOCKUP_URL =
-  "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/Tragetasche_Mockup.jpg?v=1763713012";
+  "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/IMG_1902.jpg?v=1765218360";
 
 const MUG_MOCKUP_URL =
-  "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/IMG_1833.jpg?v=1764169061";
+  "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/IMG_1901.jpg?v=1765218358";
+
+// NEU: T-Shirt Mockups
+const TEE_WHITE_MOCKUP_URL =
+  "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/IMG_1926.jpg?v=1765367168";
+
+const TEE_BLACK_MOCKUP_URL =
+  "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/IMG_1924.jpg?v=1765367167";
+
+// NEU: Overlays für T-Shirts (PNG oben drauf)
+const TEE_WHITE_OVERLAY_URL =
+  "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/ber_wei_e_Shirt.png?v=1765367191";
+
+const TEE_BLACK_OVERLAY_URL =
+  "https://cdn.shopify.com/s/files/1/0958/7346/6743/files/ber_schwarze_Shirt.png?v=1765367224";
 
 // Cache: artworkUrl + type -> fertiges PNG
 const previewCache = new Map();
@@ -205,8 +219,15 @@ async function removeBackgroundFloodFill(inputBuffer) {
     .toBuffer();
 }
 
-// transparentes Artwork + Mockup → PNG
-async function makePreviewWithBgRemoval({ artworkUrl, mockupUrl, scale, offsetX, offsetY }) {
+// transparentes Artwork + Mockup (+ optional Overlay) → PNG
+async function makePreviewWithBgRemoval({
+  artworkUrl,
+  mockupUrl,
+  scale,
+  offsetX,
+  offsetY,
+  overlayUrl, // optional
+}) {
   // Artwork laden
   const artBuf = await loadImage(artworkUrl);
 
@@ -239,11 +260,21 @@ async function makePreviewWithBgRemoval({ artworkUrl, mockupUrl, scale, offsetX,
   const left = Math.round(meta.width * offsetX);
   const top = Math.round(meta.height * offsetY);
 
-  // Artwork auf Mockup compositen
-  const finalBuf = await mockSharp
-    .composite([{ input: scaled, left, top }])
-    .png()
-    .toBuffer();
+  const composites = [{ input: scaled, left, top }];
+
+  // Falls Overlay gesetzt: PNG über alles legen
+  if (overlayUrl) {
+    const overlayBuf = await loadImage(overlayUrl);
+    const overlayPng = await sharp(overlayBuf).ensureAlpha().png().toBuffer();
+    composites.push({
+      input: overlayPng,
+      left: 0,
+      top: 0,
+    });
+  }
+
+  // Artwork (und ggf. Overlay) auf Mockup compositen
+  const finalBuf = await mockSharp.composite(composites).png().toBuffer();
 
   return finalBuf;
 }
@@ -266,9 +297,10 @@ app.get("/tote-preview", async (req, res) => {
     const finalBuffer = await makePreviewWithBgRemoval({
       artworkUrl,
       mockupUrl: TOTE_MOCKUP_URL,
-      scale: 0.42,   // Größe auf Tasche
+      scale: 0.42,   // Größe auf Tasche (wie in deinem ersten Backend)
       offsetX: 0.26, // etwas nach links
       offsetY: 0.46, // etwas nach unten
+      overlayUrl: undefined,
     });
 
     previewCache.set(cacheKey, finalBuffer);
@@ -301,9 +333,10 @@ app.get("/mug-preview", async (req, res) => {
     const finalBuffer = await makePreviewWithBgRemoval({
       artworkUrl,
       mockupUrl: MUG_MOCKUP_URL,
-      scale: 0.325,  // 25% größer als >0.26
+      scale: 0.325,  // 25% größer als >0.26 (wie vorher bei dir)
       offsetX: 0.35, // etwas nach rechts
       offsetY: 0.39, // etwas nach unten
+      overlayUrl: undefined,
     });
 
     previewCache.set(cacheKey, finalBuffer);
@@ -313,6 +346,80 @@ app.get("/mug-preview", async (req, res) => {
     console.error("Fehler in /mug-preview:", err);
     res.status(500).json({
       error: "Interner Fehler in /mug-preview",
+      detail: err.message || String(err),
+    });
+  }
+});
+
+// --------------------- NEU: Tee weiß Endpoint ---------------------
+
+app.get("/tee-white-preview", async (req, res) => {
+  const artworkUrl = req.query.url;
+  if (!artworkUrl || typeof artworkUrl !== "string") {
+    return res.status(400).json({ error: "Parameter 'url' fehlt oder ist ungültig." });
+  }
+
+  const cacheKey = "TEE_WHITE_" + artworkUrl;
+  if (previewCache.has(cacheKey)) {
+    res.setHeader("Content-Type", "image/png");
+    return res.send(previewCache.get(cacheKey));
+  }
+
+  try {
+    const finalBuffer = await makePreviewWithBgRemoval({
+      artworkUrl,
+      mockupUrl: TEE_WHITE_MOCKUP_URL,
+      // wie im zweiten Backend (relativ zentriert auf Brust)
+      scale: 0.36,
+      offsetX: 0.31,
+      offsetY: 0.26,
+      overlayUrl: TEE_WHITE_OVERLAY_URL,
+    });
+
+    previewCache.set(cacheKey, finalBuffer);
+    res.setHeader("Content-Type", "image/png");
+    res.send(finalBuffer);
+  } catch (err) {
+    console.error("Fehler in /tee-white-preview:", err);
+    res.status(500).json({
+      error: "Interner Fehler in /tee-white-preview",
+      detail: err.message || String(err),
+    });
+  }
+});
+
+// --------------------- NEU: Tee schwarz Endpoint ---------------------
+
+app.get("/tee-black-preview", async (req, res) => {
+  const artworkUrl = req.query.url;
+  if (!artworkUrl || typeof artworkUrl !== "string") {
+    return res.status(400).json({ error: "Parameter 'url' fehlt oder ist ungültig." });
+  }
+
+  const cacheKey = "TEE_BLACK_" + artworkUrl;
+  if (previewCache.has(cacheKey)) {
+    res.setHeader("Content-Type", "image/png");
+    return res.send(previewCache.get(cacheKey));
+  }
+
+  try {
+    const finalBuffer = await makePreviewWithBgRemoval({
+      artworkUrl,
+      mockupUrl: TEE_BLACK_MOCKUP_URL,
+      // gleiche Positionierung wie beim weißen Shirt
+      scale: 0.36,
+      offsetX: 0.31,
+      offsetY: 0.26,
+      overlayUrl: TEE_BLACK_OVERLAY_URL,
+    });
+
+    previewCache.set(cacheKey, finalBuffer);
+    res.setHeader("Content-Type", "image/png");
+    res.send(finalBuffer);
+  } catch (err) {
+    console.error("Fehler in /tee-black-preview:", err);
+    res.status(500).json({
+      error: "Interner Fehler in /tee-black-preview",
       detail: err.message || String(err),
     });
   }
