@@ -51,81 +51,113 @@ async function loadImage(url) {
   return Buffer.from(await resp.arrayBuffer());
 }
 
-function colorDist(c1, c2) {
-  const dr = c1[0] - c2[0];
-  const dg = c1[1] - c2[1];
-  const db = c1[2] - c2[2];
-  return Math.sqrt(dr * dr + dg * dg + db * db);
+function brightness(r, g, b) {
+  return (r + g + b) / 3;
 }
 
-function brightness(c) {
-  return (c[0] + c[1] + c[2]) / 3;
-}
+// --------------------- GRID-ENTFERNUNG (FINAL, STABIL) ---------------------
 
-// --------------------- NEUE GRID-DE-COMPOSITING-LOGIK ---------------------
-
-async function removeGridBackgroundDecomposite(inputBuffer) {
-  const GRID_CELL_SIZE = 20; // px
-  const GRID_LIGHT = 255;    // #FFFFFF
-  const GRID_DARK = 204;     // #CCCCCC
-  const GRID_TOL = 6;
-  const ALPHA_EPS = 0.02;
+async function removeGridPatternByComponents(inputBuffer) {
+  const MAX_SIZE = 6;              // max 6x6 px
+  const BRIGHT_MIN = 190;          // hellgrau
+  const BRIGHT_MAX = 255;
+  const COLOR_TOL = 15;
 
   const img = sharp(inputBuffer).ensureAlpha();
-  const meta = await img.metadata();
-  const { width, height } = meta;
+  const { width, height } = await img.metadata();
+  const raw = await img.raw().toBuffer();
 
-  if (!width || !height) {
-    throw new Error("Ungültige Bildgröße");
+  const visited = new Uint8Array(width * height);
+  const isGridPixel = new Uint8Array(width * height);
+
+  const idx = (x, y) => y * width + x;
+  const px = (i) => i * 4;
+
+  function isCandidate(i) {
+    const r = raw[px(i)];
+    const g = raw[px(i) + 1];
+    const b = raw[px(i) + 2];
+    const br = brightness(r, g, b);
+    return br >= BRIGHT_MIN && br <= BRIGHT_MAX &&
+           Math.abs(r - g) < COLOR_TOL &&
+           Math.abs(r - b) < COLOR_TOL;
   }
 
-  const raw = await img.raw().toBuffer(); // [r,g,b,a]
-
+  // --- Connected Components ---
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const idx = (y * width + x) * 4;
+      const start = idx(x, y);
+      if (visited[start] || !isCandidate(start)) continue;
 
-      const r = raw[idx];
-      const g = raw[idx + 1];
-      const b = raw[idx + 2];
+      let minX = x, maxX = x, minY = y, maxY = y;
+      const stack = [start];
+      const component = [];
 
-      const cellX = Math.floor(x / GRID_CELL_SIZE);
-      const cellY = Math.floor(y / GRID_CELL_SIZE);
-      const isLight = (cellX + cellY) % 2 === 0;
-      const bg = isLight ? GRID_LIGHT : GRID_DARK;
+      visited[start] = 1;
 
-      const diff =
-        (Math.abs(r - bg) + Math.abs(g - bg) + Math.abs(b - bg)) / 3;
+      while (stack.length) {
+        const p = stack.pop();
+        component.push(p);
+        const cx = p % width;
+        const cy = Math.floor(p / width);
 
-      // nahezu reines Grid
-      if (diff < GRID_TOL) {
-        raw[idx + 3] = 0;
-        continue;
+        minX = Math.min(minX, cx);
+        maxX = Math.max(maxX, cx);
+        minY = Math.min(minY, cy);
+        maxY = Math.max(maxY, cy);
+
+        if (maxX - minX > MAX_SIZE || maxY - minY > MAX_SIZE) break;
+
+        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nx = cx + dx;
+          const ny = cy + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          const ni = idx(nx, ny);
+          if (!visited[ni] && isCandidate(ni)) {
+            visited[ni] = 1;
+            stack.push(ni);
+          }
+        }
       }
 
-      // Alpha rekonstruieren
-      const alphaR = bg !== 0 ? 1 - (r - bg) / (0 - bg) : 1;
-      const alphaG = bg !== 0 ? 1 - (g - bg) / (0 - bg) : 1;
-      const alphaB = bg !== 0 ? 1 - (b - bg) / (0 - bg) : 1;
-
-      let alpha = (alphaR + alphaG + alphaB) / 3;
-      alpha = Math.max(0, Math.min(1, alpha));
-
-      if (alpha < ALPHA_EPS) {
-        raw[idx + 3] = 0;
-        continue;
+      if ((maxX - minX) <= MAX_SIZE && (maxY - minY) <= MAX_SIZE) {
+        for (const p of component) {
+          isGridPixel[p] = 1;
+        }
       }
-
-      raw[idx] = Math.round((r - (1 - alpha) * bg) / alpha);
-      raw[idx + 1] = Math.round((g - (1 - alpha) * bg) / alpha);
-      raw[idx + 2] = Math.round((b - (1 - alpha) * bg) / alpha);
-      raw[idx + 3] = Math.round(alpha * 255);
     }
   }
 
-  return sharp(raw, {
-    raw: { width, height, channels: 4 },
-  })
+  // --- Ersetzen durch Nachbar-Median ---
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const i = idx(x, y);
+      if (!isGridPixel[i]) continue;
+
+      const rs = [], gs = [], bs = [];
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const ni = idx(x + dx, y + dy);
+          if (!isGridPixel[ni]) {
+            rs.push(raw[px(ni)]);
+            gs.push(raw[px(ni) + 1]);
+            bs.push(raw[px(ni) + 2]);
+          }
+        }
+      }
+
+      if (rs.length) {
+        rs.sort((a,b)=>a-b);
+        gs.sort((a,b)=>a-b);
+        bs.sort((a,b)=>a-b);
+        raw[px(i)]     = rs[Math.floor(rs.length / 2)];
+        raw[px(i) + 1] = gs[Math.floor(gs.length / 2)];
+        raw[px(i) + 2] = bs[Math.floor(bs.length / 2)];
+      }
+    }
+  }
+
+  return sharp(raw, { raw: { width, height, channels: 4 } })
     .png()
     .toBuffer();
 }
@@ -138,202 +170,39 @@ async function makePreviewWithBgRemoval({
   scale,
   offsetX,
   offsetY,
-  overlayUrl, // optional
+  overlayUrl,
 }) {
-  // Artwork laden
   const artBuf = await loadImage(artworkUrl);
 
-  // NEU: Grid-De-Compositing statt Flood-Fill
   let artTransparent;
   try {
-    artTransparent = await removeGridBackgroundDecomposite(artBuf);
-  } catch (err) {
-    console.error("BG-Removal Fehler, verwende Original mit Alpha:", err);
+    artTransparent = await removeGridPatternByComponents(artBuf);
+  } catch (e) {
     artTransparent = await sharp(artBuf).ensureAlpha().png().toBuffer();
   }
 
-  // Mockup laden
   const mockBuf = await loadImage(mockupUrl);
   const mockSharp = sharp(mockBuf);
   const meta = await mockSharp.metadata();
-  if (!meta.width || !meta.height) {
-    throw new Error("Konnte Mockup-Größe nicht lesen.");
-  }
 
-  // Artwork skalieren
   const scaled = await sharp(artTransparent)
-    .resize(Math.round(meta.width * scale), null, {
-      fit: "inside",
-      fastShrinkOnLoad: true,
-    })
+    .resize(Math.round(meta.width * scale))
     .png()
     .toBuffer();
 
-  const left = Math.round(meta.width * offsetX);
-  const top = Math.round(meta.height * offsetY);
+  const composites = [{
+    input: scaled,
+    left: Math.round(meta.width * offsetX),
+    top: Math.round(meta.height * offsetY),
+  }];
 
-  const composites = [{ input: scaled, left, top }];
-
-  // Falls Overlay gesetzt: PNG über alles legen
   if (overlayUrl) {
-    const overlayBuf = await loadImage(overlayUrl);
-    const overlayPng = await sharp(overlayBuf).ensureAlpha().png().toBuffer();
-    composites.push({
-      input: overlayPng,
-      left: 0,
-      top: 0,
-    });
+    const overlay = await loadImage(overlayUrl);
+    composites.push({ input: overlay, left: 0, top: 0 });
   }
 
-  // Artwork (und ggf. Overlay) auf Mockup compositen
-  const finalBuf = await mockSharp.composite(composites).png().toBuffer();
-
-  return finalBuf;
+  return mockSharp.composite(composites).png().toBuffer();
 }
-
-// --------------------- Tote Endpoint ---------------------
-
-app.get("/tote-preview", async (req, res) => {
-  const artworkUrl = req.query.url;
-  if (!artworkUrl || typeof artworkUrl !== "string") {
-    return res.status(400).json({ error: "Parameter 'url' fehlt oder ist ungültig." });
-  }
-
-  const cacheKey = "TOTE_" + artworkUrl;
-  if (previewCache.has(cacheKey)) {
-    res.setHeader("Content-Type", "image/png");
-    return res.send(previewCache.get(cacheKey));
-  }
-
-  try {
-    const finalBuffer = await makePreviewWithBgRemoval({
-      artworkUrl,
-      mockupUrl: TOTE_MOCKUP_URL,
-      scale: 0.42,
-      offsetX: 0.26,
-      offsetY: 0.46,
-      overlayUrl: undefined,
-    });
-
-    previewCache.set(cacheKey, finalBuffer);
-    res.setHeader("Content-Type", "image/png");
-    res.send(finalBuffer);
-  } catch (err) {
-    console.error("Fehler in /tote-preview:", err);
-    res.status(500).json({
-      error: "Interner Fehler in /tote-preview",
-      detail: err.message || String(err),
-    });
-  }
-});
-
-// --------------------- Mug Endpoint ---------------------
-
-app.get("/mug-preview", async (req, res) => {
-  const artworkUrl = req.query.url;
-  if (!artworkUrl || typeof artworkUrl !== "string") {
-    return res.status(400).json({ error: "Parameter 'url' fehlt oder ist ungültig." });
-  }
-
-  const cacheKey = "MUG_" + artworkUrl;
-  if (previewCache.has(cacheKey)) {
-    res.setHeader("Content-Type", "image/png");
-    return res.send(previewCache.get(cacheKey));
-  }
-
-  try {
-    const finalBuffer = await makePreviewWithBgRemoval({
-      artworkUrl,
-      mockupUrl: MUG_MOCKUP_URL,
-      scale: 0.325,
-      offsetX: 0.35,
-      offsetY: 0.39,
-      overlayUrl: undefined,
-    });
-
-    previewCache.set(cacheKey, finalBuffer);
-    res.setHeader("Content-Type", "image/png");
-    res.send(finalBuffer);
-  } catch (err) {
-    console.error("Fehler in /mug-preview:", err);
-    res.status(500).json({
-      error: "Interner Fehler in /mug-preview",
-      detail: err.message || String(err),
-    });
-  }
-});
-
-// --------------------- NEU: Tee weiß Endpoint ---------------------
-
-app.get("/tee-white-preview", async (req, res) => {
-  const artworkUrl = req.query.url;
-  if (!artworkUrl || typeof artworkUrl !== "string") {
-    return res.status(400).json({ error: "Parameter 'url' fehlt oder ist ungültig." });
-  }
-
-  const cacheKey = "TEE_WHITE_" + artworkUrl;
-  if (previewCache.has(cacheKey)) {
-    res.setHeader("Content-Type", "image/png");
-    return res.send(previewCache.get(cacheKey));
-  }
-
-  try {
-    const finalBuffer = await makePreviewWithBgRemoval({
-      artworkUrl,
-      mockupUrl: TEE_WHITE_MOCKUP_URL,
-      scale: 0.36,
-      offsetX: 0.31,
-      offsetY: 0.26,
-      overlayUrl: TEE_WHITE_OVERLAY_URL,
-    });
-
-    previewCache.set(cacheKey, finalBuffer);
-    res.setHeader("Content-Type", "image/png");
-    res.send(finalBuffer);
-  } catch (err) {
-    console.error("Fehler in /tee-white-preview:", err);
-    res.status(500).json({
-      error: "Interner Fehler in /tee-white-preview",
-      detail: err.message || String(err),
-    });
-  }
-});
-
-// --------------------- NEU: Tee schwarz Endpoint ---------------------
-
-app.get("/tee-black-preview", async (req, res) => {
-  const artworkUrl = req.query.url;
-  if (!artworkUrl || typeof artworkUrl !== "string") {
-    return res.status(400).json({ error: "Parameter 'url' fehlt oder ist ungültig." });
-  }
-
-  const cacheKey = "TEE_BLACK_" + artworkUrl;
-  if (previewCache.has(cacheKey)) {
-    res.setHeader("Content-Type", "image/png");
-    return res.send(previewCache.get(cacheKey));
-  }
-
-  try {
-    const finalBuffer = await makePreviewWithBgRemoval({
-      artworkUrl,
-      mockupUrl: TEE_BLACK_MOCKUP_URL,
-      scale: 0.36,
-      offsetX: 0.31,
-      offsetY: 0.26,
-      overlayUrl: TEE_BLACK_OVERLAY_URL,
-    });
-
-    previewCache.set(cacheKey, finalBuffer);
-    res.setHeader("Content-Type", "image/png");
-    res.send(finalBuffer);
-  } catch (err) {
-    console.error("Fehler in /tee-black-preview:", err);
-    res.status(500).json({
-      error: "Interner Fehler in /tee-black-preview",
-      detail: err.message || String(err),
-    });
-  }
-});
 
 // --------------------- Serverstart ---------------------
 
