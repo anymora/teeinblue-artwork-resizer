@@ -65,11 +65,9 @@ function brightness(c) {
 // --------------------- NEUE GRID-DE-COMPOSITING-LOGIK ---------------------
 
 async function removeGridBackgroundDecomposite(inputBuffer) {
-  // === HARTE GRID-REGELN (sicher) ===
-  const MAX_W = 8;          // Grid darf niemals breiter sein
-  const MAX_H = 8;          // Grid darf niemals höher sein
-  const MIN_BRIGHT = 180;   // helles Grau / Weiß
-  const COLOR_TOL = 20;     // JPEG-Toleranz
+  const MAX_SIZE = 9;          // Grid max ~6px, JPEG-Toleranz
+  const MIN_BRIGHT = 130;      // deutlich runter
+  const COLOR_TOL = 40;        // JPEG realistisch
 
   const img = sharp(inputBuffer).ensureAlpha();
   const { width, height } = await img.metadata();
@@ -83,11 +81,10 @@ async function removeGridBackgroundDecomposite(inputBuffer) {
   const idx = (x, y) => y * width + x;
   const p   = (i) => i * 4;
 
-  function isGridColor(i) {
+  function isGrayish(i) {
     const r = raw[p(i)];
     const g = raw[p(i) + 1];
     const b = raw[p(i) + 2];
-
     const br = (r + g + b) / 3;
 
     return (
@@ -98,21 +95,20 @@ async function removeGridBackgroundDecomposite(inputBuffer) {
     );
   }
 
-  // === CONNECTED COMPONENTS ===
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const start = idx(x, y);
-      if (visited[start] || !isGridColor(start)) continue;
+      if (visited[start] || !isGrayish(start)) continue;
 
       const stack = [start];
-      const component = [];
+      const comp = [];
 
       let minX = x, maxX = x, minY = y, maxY = y;
       visited[start] = 1;
 
       while (stack.length) {
         const cur = stack.pop();
-        component.push(cur);
+        comp.push(cur);
 
         const cx = cur % width;
         const cy = Math.floor(cur / width);
@@ -122,33 +118,29 @@ async function removeGridBackgroundDecomposite(inputBuffer) {
         minY = Math.min(minY, cy);
         maxY = Math.max(maxY, cy);
 
-        // ❌ SOFORT ABBRUCH: KEIN GRID
-        if (maxX - minX > MAX_W || maxY - minY > MAX_H) {
-          component.length = 0;
-          break;
-        }
-
         for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
           const nx = cx + dx;
           const ny = cy + dy;
           if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
 
           const ni = idx(nx, ny);
-          if (!visited[ni] && isGridColor(ni)) {
+          if (!visited[ni] && isGrayish(ni)) {
             visited[ni] = 1;
             stack.push(ni);
           }
         }
       }
 
-      // ✅ NUR KLEINE FLÄCHEN DÜRFEN ENTFERNT WERDEN
-      for (const i of component) {
-        remove[i] = 1;
+      const w = maxX - minX + 1;
+      const h = maxY - minY + 1;
+
+      // ✅ NUR HIER ENTSCHEIDEN
+      if (w <= MAX_SIZE && h <= MAX_SIZE) {
+        for (const i of comp) remove[i] = 1;
       }
     }
   }
 
-  // === ALPHA SETZEN ===
   for (let i = 0; i < remove.length; i++) {
     if (remove[i]) raw[p(i) + 3] = 0;
   }
@@ -157,6 +149,7 @@ async function removeGridBackgroundDecomposite(inputBuffer) {
     raw: { width, height, channels: 4 },
   }).png().toBuffer();
 }
+
 
 
 
