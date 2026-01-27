@@ -62,153 +62,64 @@ function brightness(c) {
   return (c[0] + c[1] + c[2]) / 3;
 }
 
-// Nur heller Randhintergrund → transparent machen
-async function removeBackgroundFloodFill(inputBuffer) {
+// --------------------- NEUE GRID-DE-COMPOSITING-LOGIK ---------------------
+
+async function removeGridBackgroundDecomposite(inputBuffer) {
+  const GRID_CELL_SIZE = 20; // px
+  const GRID_LIGHT = 255;    // #FFFFFF
+  const GRID_DARK = 204;     // #CCCCCC
+  const GRID_TOL = 6;
+  const ALPHA_EPS = 0.02;
+
   const img = sharp(inputBuffer).ensureAlpha();
   const meta = await img.metadata();
   const { width, height } = meta;
 
-  if (!width || !height) throw new Error("Ungültige Bildgröße");
-
-  const raw = await img.raw().toBuffer(); // [r,g,b,a, ...]
-
-  const samples = [];
-  const stepX = Math.max(1, Math.floor(width / 50));
-  const stepY = Math.max(1, Math.floor(height / 50));
-
-  function samplePixelAt(x, y) {
-    const idx = (y * width + x) * 4;
-    const r = raw[idx];
-    const g = raw[idx + 1];
-    const b = raw[idx + 2];
-    const a = raw[idx + 3];
-    if (a > 0) samples.push([r, g, b]);
+  if (!width || !height) {
+    throw new Error("Ungültige Bildgröße");
   }
 
-  // Rand abtasten
-  for (let x = 0; x < width; x += stepX) {
-    samplePixelAt(x, 0);
-    samplePixelAt(x, height - 1);
-  }
-  for (let y = 0; y < height; y += stepY) {
-    samplePixelAt(0, y);
-    samplePixelAt(width - 1, y);
-  }
+  const raw = await img.raw().toBuffer(); // [r,g,b,a]
 
-  if (!samples.length) return inputBuffer;
-
-  // Cluster bilden
-  const clusters = [];
-  const maxClusterDist = 25;
-
-  for (const col of samples) {
-    let found = false;
-    for (const cl of clusters) {
-      if (colorDist(col, cl.color) < maxClusterDist) {
-        cl.count++;
-        cl.color[0] = Math.round((cl.color[0] * (cl.count - 1) + col[0]) / cl.count);
-        cl.color[1] = Math.round((cl.color[1] * (cl.count - 1) + col[1]) / cl.count);
-        cl.color[2] = Math.round((cl.color[2] * (cl.count - 1) + col[2]) / cl.count);
-        found = true;
-        break;
-      }
-    }
-    if (!found) clusters.push({ color: [...col], count: 1 });
-  }
-
-  clusters.sort((a, b) => b.count - a.count);
-
-  // Nur sehr helle Randfarben als Hintergrund zulassen
-  const bgColors = clusters
-    .filter((c) => brightness(c.color) > 200)
-    .slice(0, 3)
-    .map((c) => c.color);
-
-  if (!bgColors.length) {
-    // kein klarer heller Randhintergrund -> Original zurück
-    return inputBuffer;
-  }
-
-  const visited = new Uint8Array(width * height);
-  const queue = [];
-  const TOL_START = 24;
-  const TOL_GROW = 28;
-
-  function isBgColor(r, g, b, tol) {
-    return bgColors.some((bg) => colorDist([r, g, b], bg) < tol);
-  }
-
-  function tryEnqueue(x, y, tol) {
-    if (x < 0 || y < 0 || x >= width || y >= height) return;
-    const idxPix = y * width + x;
-    if (visited[idxPix]) return;
-
-    const idx = idxPix * 4;
-    const r = raw[idx];
-    const g = raw[idx + 1];
-    const b = raw[idx + 2];
-    const a = raw[idx + 3];
-
-    if (a === 0) {
-      visited[idxPix] = 1;
-      queue.push([x, y]);
-      return;
-    }
-
-    if (brightness([r, g, b]) > 200 && isBgColor(r, g, b, tol)) {
-      visited[idxPix] = 1;
-      queue.push([x, y]);
-    }
-  }
-
-  // Start vom Rand
-  for (let x = 0; x < width; x++) {
-    tryEnqueue(x, 0, TOL_START);
-    tryEnqueue(x, height - 1, TOL_START);
-  }
   for (let y = 0; y < height; y++) {
-    tryEnqueue(0, y, TOL_START);
-    tryEnqueue(width - 1, y, TOL_START);
-  }
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
 
-  // Flood-Fill
-  while (queue.length) {
-    const [cx, cy] = queue.pop();
-    const neighbors = [
-      [cx - 1, cy],
-      [cx + 1, cy],
-      [cx, cy - 1],
-      [cx, cy + 1],
-    ];
-    for (const [nx, ny] of neighbors) {
-      if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-      const idxPix = ny * width + nx;
-      if (visited[idxPix]) continue;
-
-      const idx = idxPix * 4;
       const r = raw[idx];
       const g = raw[idx + 1];
       const b = raw[idx + 2];
-      const a = raw[idx + 3];
 
-      if (
-        a === 0 ||
-        (brightness([r, g, b]) > 200 && isBgColor(r, g, b, TOL_GROW))
-      ) {
-        visited[idxPix] = 1;
-        queue.push([nx, ny]);
-      }
-    }
-  }
+      const cellX = Math.floor(x / GRID_CELL_SIZE);
+      const cellY = Math.floor(y / GRID_CELL_SIZE);
+      const isLight = (cellX + cellY) % 2 === 0;
+      const bg = isLight ? GRID_LIGHT : GRID_DARK;
 
-  // Hintergrund-Pixel transparent setzen
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idxPix = y * width + x;
-      if (visited[idxPix]) {
-        const idx = idxPix * 4;
+      const diff =
+        (Math.abs(r - bg) + Math.abs(g - bg) + Math.abs(b - bg)) / 3;
+
+      // nahezu reines Grid
+      if (diff < GRID_TOL) {
         raw[idx + 3] = 0;
+        continue;
       }
+
+      // Alpha rekonstruieren
+      const alphaR = bg !== 0 ? 1 - (r - bg) / (0 - bg) : 1;
+      const alphaG = bg !== 0 ? 1 - (g - bg) / (0 - bg) : 1;
+      const alphaB = bg !== 0 ? 1 - (b - bg) / (0 - bg) : 1;
+
+      let alpha = (alphaR + alphaG + alphaB) / 3;
+      alpha = Math.max(0, Math.min(1, alpha));
+
+      if (alpha < ALPHA_EPS) {
+        raw[idx + 3] = 0;
+        continue;
+      }
+
+      raw[idx] = Math.round((r - (1 - alpha) * bg) / alpha);
+      raw[idx + 1] = Math.round((g - (1 - alpha) * bg) / alpha);
+      raw[idx + 2] = Math.round((b - (1 - alpha) * bg) / alpha);
+      raw[idx + 3] = Math.round(alpha * 255);
     }
   }
 
@@ -219,7 +130,8 @@ async function removeBackgroundFloodFill(inputBuffer) {
     .toBuffer();
 }
 
-// transparentes Artwork + Mockup (+ optional Overlay) → PNG
+// --------------------- Preview-Erstellung ---------------------
+
 async function makePreviewWithBgRemoval({
   artworkUrl,
   mockupUrl,
@@ -231,10 +143,10 @@ async function makePreviewWithBgRemoval({
   // Artwork laden
   const artBuf = await loadImage(artworkUrl);
 
-  // Hintergrund entfernen; wenn das schiefgeht, trotzdem PNG mit Alpha verwenden
+  // NEU: Grid-De-Compositing statt Flood-Fill
   let artTransparent;
   try {
-    artTransparent = await removeBackgroundFloodFill(artBuf);
+    artTransparent = await removeGridBackgroundDecomposite(artBuf);
   } catch (err) {
     console.error("BG-Removal Fehler, verwende Original mit Alpha:", err);
     artTransparent = await sharp(artBuf).ensureAlpha().png().toBuffer();
@@ -297,9 +209,9 @@ app.get("/tote-preview", async (req, res) => {
     const finalBuffer = await makePreviewWithBgRemoval({
       artworkUrl,
       mockupUrl: TOTE_MOCKUP_URL,
-      scale: 0.42,   // Größe auf Tasche (wie in deinem ersten Backend)
-      offsetX: 0.26, // etwas nach links
-      offsetY: 0.46, // etwas nach unten
+      scale: 0.42,
+      offsetX: 0.26,
+      offsetY: 0.46,
       overlayUrl: undefined,
     });
 
@@ -333,9 +245,9 @@ app.get("/mug-preview", async (req, res) => {
     const finalBuffer = await makePreviewWithBgRemoval({
       artworkUrl,
       mockupUrl: MUG_MOCKUP_URL,
-      scale: 0.325,  // 25% größer als >0.26 (wie vorher bei dir)
-      offsetX: 0.35, // etwas nach rechts
-      offsetY: 0.39, // etwas nach unten
+      scale: 0.325,
+      offsetX: 0.35,
+      offsetY: 0.39,
       overlayUrl: undefined,
     });
 
@@ -369,7 +281,6 @@ app.get("/tee-white-preview", async (req, res) => {
     const finalBuffer = await makePreviewWithBgRemoval({
       artworkUrl,
       mockupUrl: TEE_WHITE_MOCKUP_URL,
-      // wie im zweiten Backend (relativ zentriert auf Brust)
       scale: 0.36,
       offsetX: 0.31,
       offsetY: 0.26,
@@ -406,7 +317,6 @@ app.get("/tee-black-preview", async (req, res) => {
     const finalBuffer = await makePreviewWithBgRemoval({
       artworkUrl,
       mockupUrl: TEE_BLACK_MOCKUP_URL,
-      // gleiche Positionierung wie beim weißen Shirt
       scale: 0.36,
       offsetX: 0.31,
       offsetY: 0.26,
