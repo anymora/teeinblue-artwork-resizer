@@ -51,43 +51,59 @@ async function loadImage(url) {
   return Buffer.from(await resp.arrayBuffer());
 }
 
-function brightness(r, g, b) {
-  return (r + g + b) / 3;
+function colorDist(c1, c2) {
+  const dr = c1[0] - c2[0];
+  const dg = c1[1] - c2[1];
+  const db = c1[2] - c2[2];
+  return Math.sqrt(dr * dr + dg * dg + db * db);
 }
 
-// --------------------- GRID-ENTFERNUNG (FINAL, STABIL) ---------------------
+function brightness(c) {
+  return (c[0] + c[1] + c[2]) / 3;
+}
 
-async function removeGridPatternByComponents(inputBuffer) {
-  const MAX_SIZE = 6;              // max 6x6 px
-  const BRIGHT_MIN = 190;          // hellgrau
-  const BRIGHT_MAX = 255;
+// --------------------- GRID-LOGIK (ERSATZ DER ALTEN FUNKTION) ---------------------
+
+async function removeGridBackgroundDecomposite(inputBuffer) {
+  const MAX_SIZE = 6;          // max. Breite/Höhe eines Grid-Elements
+  const BRIGHT_MIN = 190;      // helles Grau
+  const BRIGHT_MAX = 255;      // Weiß
   const COLOR_TOL = 15;
 
   const img = sharp(inputBuffer).ensureAlpha();
-  const { width, height } = await img.metadata();
-  const raw = await img.raw().toBuffer();
+  const meta = await img.metadata();
+  const { width, height } = meta;
 
-  const visited = new Uint8Array(width * height);
-  const isGridPixel = new Uint8Array(width * height);
-
-  const idx = (x, y) => y * width + x;
-  const px = (i) => i * 4;
-
-  function isCandidate(i) {
-    const r = raw[px(i)];
-    const g = raw[px(i) + 1];
-    const b = raw[px(i) + 2];
-    const br = brightness(r, g, b);
-    return br >= BRIGHT_MIN && br <= BRIGHT_MAX &&
-           Math.abs(r - g) < COLOR_TOL &&
-           Math.abs(r - b) < COLOR_TOL;
+  if (!width || !height) {
+    throw new Error("Ungültige Bildgröße");
   }
 
-  // --- Connected Components ---
+  const raw = await img.raw().toBuffer(); // [r,g,b,a]
+  const visited = new Uint8Array(width * height);
+  const isGrid = new Uint8Array(width * height);
+
+  const idx = (x, y) => y * width + x;
+  const p = (i) => i * 4;
+
+  function isGridCandidate(i) {
+    const r = raw[p(i)];
+    const g = raw[p(i) + 1];
+    const b = raw[p(i) + 2];
+    const br = (r + g + b) / 3;
+    return (
+      br >= BRIGHT_MIN &&
+      br <= BRIGHT_MAX &&
+      Math.abs(r - g) < COLOR_TOL &&
+      Math.abs(r - b) < COLOR_TOL &&
+      Math.abs(g - b) < COLOR_TOL
+    );
+  }
+
+  // Connected Components
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const start = idx(x, y);
-      if (visited[start] || !isCandidate(start)) continue;
+      if (visited[start] || !isGridCandidate(start)) continue;
 
       let minX = x, maxX = x, minY = y, maxY = y;
       const stack = [start];
@@ -96,10 +112,11 @@ async function removeGridPatternByComponents(inputBuffer) {
       visited[start] = 1;
 
       while (stack.length) {
-        const p = stack.pop();
-        component.push(p);
-        const cx = p % width;
-        const cy = Math.floor(p / width);
+        const cur = stack.pop();
+        component.push(cur);
+
+        const cx = cur % width;
+        const cy = Math.floor(cur / width);
 
         minX = Math.min(minX, cx);
         maxX = Math.max(maxX, cx);
@@ -113,7 +130,7 @@ async function removeGridPatternByComponents(inputBuffer) {
           const ny = cy + dy;
           if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
           const ni = idx(nx, ny);
-          if (!visited[ni] && isCandidate(ni)) {
+          if (!visited[ni] && isGridCandidate(ni)) {
             visited[ni] = 1;
             stack.push(ni);
           }
@@ -121,27 +138,27 @@ async function removeGridPatternByComponents(inputBuffer) {
       }
 
       if ((maxX - minX) <= MAX_SIZE && (maxY - minY) <= MAX_SIZE) {
-        for (const p of component) {
-          isGridPixel[p] = 1;
+        for (const i of component) {
+          isGrid[i] = 1;
         }
       }
     }
   }
 
-  // --- Ersetzen durch Nachbar-Median ---
+  // Inpainting (Median der Nachbarn)
   for (let y = 1; y < height - 1; y++) {
     for (let x = 1; x < width - 1; x++) {
       const i = idx(x, y);
-      if (!isGridPixel[i]) continue;
+      if (!isGrid[i]) continue;
 
       const rs = [], gs = [], bs = [];
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           const ni = idx(x + dx, y + dy);
-          if (!isGridPixel[ni]) {
-            rs.push(raw[px(ni)]);
-            gs.push(raw[px(ni) + 1]);
-            bs.push(raw[px(ni) + 2]);
+          if (!isGrid[ni]) {
+            rs.push(raw[p(ni)]);
+            gs.push(raw[p(ni) + 1]);
+            bs.push(raw[p(ni) + 2]);
           }
         }
       }
@@ -150,14 +167,16 @@ async function removeGridPatternByComponents(inputBuffer) {
         rs.sort((a,b)=>a-b);
         gs.sort((a,b)=>a-b);
         bs.sort((a,b)=>a-b);
-        raw[px(i)]     = rs[Math.floor(rs.length / 2)];
-        raw[px(i) + 1] = gs[Math.floor(gs.length / 2)];
-        raw[px(i) + 2] = bs[Math.floor(bs.length / 2)];
+        raw[p(i)]     = rs[Math.floor(rs.length / 2)];
+        raw[p(i) + 1] = gs[Math.floor(gs.length / 2)];
+        raw[p(i) + 2] = bs[Math.floor(bs.length / 2)];
       }
     }
   }
 
-  return sharp(raw, { raw: { width, height, channels: 4 } })
+  return sharp(raw, {
+    raw: { width, height, channels: 4 },
+  })
     .png()
     .toBuffer();
 }
@@ -170,14 +189,15 @@ async function makePreviewWithBgRemoval({
   scale,
   offsetX,
   offsetY,
-  overlayUrl,
+  overlayUrl, // optional
 }) {
   const artBuf = await loadImage(artworkUrl);
 
   let artTransparent;
   try {
-    artTransparent = await removeGridPatternByComponents(artBuf);
-  } catch (e) {
+    artTransparent = await removeGridBackgroundDecomposite(artBuf);
+  } catch (err) {
+    console.error("BG-Removal Fehler, verwende Original mit Alpha:", err);
     artTransparent = await sharp(artBuf).ensureAlpha().png().toBuffer();
   }
 
@@ -186,7 +206,10 @@ async function makePreviewWithBgRemoval({
   const meta = await mockSharp.metadata();
 
   const scaled = await sharp(artTransparent)
-    .resize(Math.round(meta.width * scale))
+    .resize(Math.round(meta.width * scale), null, {
+      fit: "inside",
+      fastShrinkOnLoad: true,
+    })
     .png()
     .toBuffer();
 
@@ -197,8 +220,9 @@ async function makePreviewWithBgRemoval({
   }];
 
   if (overlayUrl) {
-    const overlay = await loadImage(overlayUrl);
-    composites.push({ input: overlay, left: 0, top: 0 });
+    const overlayBuf = await loadImage(overlayUrl);
+    const overlayPng = await sharp(overlayBuf).ensureAlpha().png().toBuffer();
+    composites.push({ input: overlayPng, left: 0, top: 0 });
   }
 
   return mockSharp.composite(composites).png().toBuffer();
