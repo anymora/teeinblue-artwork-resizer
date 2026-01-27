@@ -46,7 +46,7 @@ app.get("/", (req, res) => {
 async function loadImage(url) {
   const resp = await fetch(url, { headers: SHOPIFY_FETCH_HEADERS });
   if (!resp.ok) {
-    throw new Error(Bild konnte nicht geladen werden: ${url} (HTTP ${resp.status}));
+    throw new Error(`Bild konnte nicht geladen werden: ${url} (HTTP ${resp.status})`);
   }
   return Buffer.from(await resp.arrayBuffer());
 }
