@@ -65,10 +65,13 @@ function brightness(c) {
 // --------------------- NEUE GRID-DE-COMPOSITING-LOGIK ---------------------
 
 async function removeGridBackgroundDecomposite(inputBuffer) {
-  const MAX_W = 6; // max Grid-Breite
-  const MAX_H = 6; // max Grid-Höhe
-  const BRIGHT_MIN = 190; // helles Grau
-  const COLOR_TOL = 12;
+  const GRID_COLORS = [
+    { r: 255, g: 255, b: 255 }, // weiß
+    { r: 204, g: 204, b: 204 }  // grau
+  ];
+
+  const COLOR_TOL = 35;     // JPEG-Toleranz
+  const MIN_ALPHA = 0.05;  // sehr schwache Reste kappen
 
   const img = sharp(inputBuffer).ensureAlpha();
   const meta = await img.metadata();
@@ -79,85 +82,66 @@ async function removeGridBackgroundDecomposite(inputBuffer) {
   }
 
   const raw = await img.raw().toBuffer(); // RGBA
-  const visited = new Uint8Array(width * height);
-  const markRemove = new Uint8Array(width * height);
 
-  const idx = (x, y) => y * width + x;
-  const p = (i) => i * 4;
-
-  function isGridColor(i) {
-    const r = raw[p(i)];
-    const g = raw[p(i) + 1];
-    const b = raw[p(i) + 2];
-    const br = (r + g + b) / 3;
-
-    return (
-      br >= BRIGHT_MIN &&
-      Math.abs(r - g) < COLOR_TOL &&
-      Math.abs(r - b) < COLOR_TOL &&
-      Math.abs(g - b) < COLOR_TOL
+  function colorDist(r, g, b, c) {
+    return Math.sqrt(
+      (r - c.r) * (r - c.r) +
+      (g - c.g) * (g - c.g) +
+      (b - c.b) * (b - c.b)
     );
   }
 
-  // Connected Components
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const start = idx(x, y);
-      if (visited[start] || !isGridColor(start)) continue;
+  for (let i = 0; i < width * height; i++) {
+    const p = i * 4;
 
-      const stack = [start];
-      const component = [];
+    const r = raw[p];
+    const g = raw[p + 1];
+    const b = raw[p + 2];
 
-      let minX = x, maxX = x, minY = y, maxY = y;
-      visited[start] = 1;
+    // nächstgelegene Grid-Farbe bestimmen
+    let bestBg = null;
+    let bestDist = Infinity;
 
-      while (stack.length) {
-        const cur = stack.pop();
-        component.push(cur);
-
-        const cx = cur % width;
-        const cy = Math.floor(cur / width);
-
-        minX = Math.min(minX, cx);
-        maxX = Math.max(maxX, cx);
-        minY = Math.min(minY, cy);
-        maxY = Math.max(maxY, cy);
-
-        if (maxX - minX > MAX_W || maxY - minY > MAX_H) break;
-
-        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-          const nx = cx + dx;
-          const ny = cy + dy;
-          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-          const ni = idx(nx, ny);
-          if (!visited[ni] && isGridColor(ni)) {
-            visited[ni] = 1;
-            stack.push(ni);
-          }
-        }
-      }
-
-      if ((maxX - minX) <= MAX_W && (maxY - minY) <= MAX_H) {
-        for (const i of component) {
-          markRemove[i] = 1;
-        }
+    for (const bg of GRID_COLORS) {
+      const d = colorDist(r, g, b, bg);
+      if (d < bestDist) {
+        bestDist = d;
+        bestBg = bg;
       }
     }
-  }
 
-  // Entfernen durch Alpha = 0
-  for (let i = 0; i < markRemove.length; i++) {
-    if (markRemove[i]) {
-      raw[p(i) + 3] = 0;
+    // zu weit weg → sicher Motiv
+    if (bestDist > COLOR_TOL) continue;
+
+    // Alpha rekonstruieren (Porter-Duff rückwärts)
+    const alphaR = bestBg.r !== 0 ? 1 - (r - bestBg.r) / (0 - bestBg.r) : 1;
+    const alphaG = bestBg.g !== 0 ? 1 - (g - bestBg.g) / (0 - bestBg.g) : 1;
+    const alphaB = bestBg.b !== 0 ? 1 - (b - bestBg.b) / (0 - bestBg.b) : 1;
+
+    let alpha = (alphaR + alphaG + alphaB) / 3;
+    alpha = Math.max(0, Math.min(1, alpha));
+
+    if (alpha < MIN_ALPHA) {
+      raw[p + 3] = 0;
+      continue;
     }
+
+    // Vordergrundfarbe rekonstruieren
+    raw[p]     = Math.round((r - (1 - alpha) * bestBg.r) / alpha);
+    raw[p + 1] = Math.round((g - (1 - alpha) * bestBg.g) / alpha);
+    raw[p + 2] = Math.round((b - (1 - alpha) * bestBg.b) / alpha);
+    raw[p + 3] = Math.round(alpha * 255);
   }
 
   return sharp(raw, {
     raw: { width, height, channels: 4 },
   })
+    .ensureAlpha()
+    .flatten({ background: { r: 0, g: 0, b: 0, alpha: 0 } })
     .png()
     .toBuffer();
 }
+
 
 // --------------------- Preview-Erstellung ---------------------
 
