@@ -46,7 +46,7 @@ app.get("/", (req, res) => {
 async function loadImage(url) {
   const resp = await fetch(url, { headers: SHOPIFY_FETCH_HEADERS });
   if (!resp.ok) {
-    throw new Error(`Bild konnte nicht geladen werden: ${url} (HTTP ${resp.status})`);
+    throw new Error(Bild konnte nicht geladen werden: ${url} (HTTP ${resp.status}));
   }
   return Buffer.from(await resp.arrayBuffer());
 }
@@ -62,13 +62,13 @@ function brightness(c) {
   return (c[0] + c[1] + c[2]) / 3;
 }
 
-// --------------------- GRID-LOGIK (ERSATZ DER ALTEN FUNKTION) ---------------------
+// --------------------- NEUE GRID-DE-COMPOSITING-LOGIK ---------------------
 
 async function removeGridBackgroundDecomposite(inputBuffer) {
-  const MAX_SIZE = 6;          // max. Breite/Höhe eines Grid-Elements
-  const BRIGHT_MIN = 190;      // helles Grau
-  const BRIGHT_MAX = 255;      // Weiß
-  const COLOR_TOL = 15;
+  const MAX_W = 6; // max Grid-Breite
+  const MAX_H = 6; // max Grid-Höhe
+  const BRIGHT_MIN = 190; // helles Grau
+  const COLOR_TOL = 12;
 
   const img = sharp(inputBuffer).ensureAlpha();
   const meta = await img.metadata();
@@ -78,21 +78,21 @@ async function removeGridBackgroundDecomposite(inputBuffer) {
     throw new Error("Ungültige Bildgröße");
   }
 
-  const raw = await img.raw().toBuffer(); // [r,g,b,a]
+  const raw = await img.raw().toBuffer(); // RGBA
   const visited = new Uint8Array(width * height);
-  const isGrid = new Uint8Array(width * height);
+  const markRemove = new Uint8Array(width * height);
 
   const idx = (x, y) => y * width + x;
   const p = (i) => i * 4;
 
-  function isGridCandidate(i) {
+  function isGridColor(i) {
     const r = raw[p(i)];
     const g = raw[p(i) + 1];
     const b = raw[p(i) + 2];
     const br = (r + g + b) / 3;
+
     return (
       br >= BRIGHT_MIN &&
-      br <= BRIGHT_MAX &&
       Math.abs(r - g) < COLOR_TOL &&
       Math.abs(r - b) < COLOR_TOL &&
       Math.abs(g - b) < COLOR_TOL
@@ -103,12 +103,12 @@ async function removeGridBackgroundDecomposite(inputBuffer) {
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const start = idx(x, y);
-      if (visited[start] || !isGridCandidate(start)) continue;
+      if (visited[start] || !isGridColor(start)) continue;
 
-      let minX = x, maxX = x, minY = y, maxY = y;
       const stack = [start];
       const component = [];
 
+      let minX = x, maxX = x, minY = y, maxY = y;
       visited[start] = 1;
 
       while (stack.length) {
@@ -123,54 +123,32 @@ async function removeGridBackgroundDecomposite(inputBuffer) {
         minY = Math.min(minY, cy);
         maxY = Math.max(maxY, cy);
 
-        if (maxX - minX > MAX_SIZE || maxY - minY > MAX_SIZE) break;
+        if (maxX - minX > MAX_W || maxY - minY > MAX_H) break;
 
         for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
           const nx = cx + dx;
           const ny = cy + dy;
           if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
           const ni = idx(nx, ny);
-          if (!visited[ni] && isGridCandidate(ni)) {
+          if (!visited[ni] && isGridColor(ni)) {
             visited[ni] = 1;
             stack.push(ni);
           }
         }
       }
 
-      if ((maxX - minX) <= MAX_SIZE && (maxY - minY) <= MAX_SIZE) {
+      if ((maxX - minX) <= MAX_W && (maxY - minY) <= MAX_H) {
         for (const i of component) {
-          isGrid[i] = 1;
+          markRemove[i] = 1;
         }
       }
     }
   }
 
-  // Inpainting (Median der Nachbarn)
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const i = idx(x, y);
-      if (!isGrid[i]) continue;
-
-      const rs = [], gs = [], bs = [];
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const ni = idx(x + dx, y + dy);
-          if (!isGrid[ni]) {
-            rs.push(raw[p(ni)]);
-            gs.push(raw[p(ni) + 1]);
-            bs.push(raw[p(ni) + 2]);
-          }
-        }
-      }
-
-      if (rs.length) {
-        rs.sort((a,b)=>a-b);
-        gs.sort((a,b)=>a-b);
-        bs.sort((a,b)=>a-b);
-        raw[p(i)]     = rs[Math.floor(rs.length / 2)];
-        raw[p(i) + 1] = gs[Math.floor(gs.length / 2)];
-        raw[p(i) + 2] = bs[Math.floor(bs.length / 2)];
-      }
+  // Entfernen durch Alpha = 0
+  for (let i = 0; i < markRemove.length; i++) {
+    if (markRemove[i]) {
+      raw[p(i) + 3] = 0;
     }
   }
 
@@ -191,8 +169,10 @@ async function makePreviewWithBgRemoval({
   offsetY,
   overlayUrl, // optional
 }) {
+  // Artwork laden
   const artBuf = await loadImage(artworkUrl);
 
+  // NEU: Grid-De-Compositing statt Flood-Fill
   let artTransparent;
   try {
     artTransparent = await removeGridBackgroundDecomposite(artBuf);
@@ -201,10 +181,15 @@ async function makePreviewWithBgRemoval({
     artTransparent = await sharp(artBuf).ensureAlpha().png().toBuffer();
   }
 
+  // Mockup laden
   const mockBuf = await loadImage(mockupUrl);
   const mockSharp = sharp(mockBuf);
   const meta = await mockSharp.metadata();
+  if (!meta.width || !meta.height) {
+    throw new Error("Konnte Mockup-Größe nicht lesen.");
+  }
 
+  // Artwork skalieren
   const scaled = await sharp(artTransparent)
     .resize(Math.round(meta.width * scale), null, {
       fit: "inside",
@@ -213,20 +198,171 @@ async function makePreviewWithBgRemoval({
     .png()
     .toBuffer();
 
-  const composites = [{
-    input: scaled,
-    left: Math.round(meta.width * offsetX),
-    top: Math.round(meta.height * offsetY),
-  }];
+  const left = Math.round(meta.width * offsetX);
+  const top = Math.round(meta.height * offsetY);
 
+  const composites = [{ input: scaled, left, top }];
+
+  // Falls Overlay gesetzt: PNG über alles legen
   if (overlayUrl) {
     const overlayBuf = await loadImage(overlayUrl);
     const overlayPng = await sharp(overlayBuf).ensureAlpha().png().toBuffer();
-    composites.push({ input: overlayPng, left: 0, top: 0 });
+    composites.push({
+      input: overlayPng,
+      left: 0,
+      top: 0,
+    });
   }
 
-  return mockSharp.composite(composites).png().toBuffer();
+  // Artwork (und ggf. Overlay) auf Mockup compositen
+  const finalBuf = await mockSharp.composite(composites).png().toBuffer();
+
+  return finalBuf;
 }
+
+// --------------------- Tote Endpoint ---------------------
+
+app.get("/tote-preview", async (req, res) => {
+  const artworkUrl = req.query.url;
+  if (!artworkUrl || typeof artworkUrl !== "string") {
+    return res.status(400).json({ error: "Parameter 'url' fehlt oder ist ungültig." });
+  }
+
+  const cacheKey = "TOTE_" + artworkUrl;
+  if (previewCache.has(cacheKey)) {
+    res.setHeader("Content-Type", "image/png");
+    return res.send(previewCache.get(cacheKey));
+  }
+
+  try {
+    const finalBuffer = await makePreviewWithBgRemoval({
+      artworkUrl,
+      mockupUrl: TOTE_MOCKUP_URL,
+      scale: 0.42,
+      offsetX: 0.26,
+      offsetY: 0.46,
+      overlayUrl: undefined,
+    });
+
+    previewCache.set(cacheKey, finalBuffer);
+    res.setHeader("Content-Type", "image/png");
+    res.send(finalBuffer);
+  } catch (err) {
+    console.error("Fehler in /tote-preview:", err);
+    res.status(500).json({
+      error: "Interner Fehler in /tote-preview",
+      detail: err.message || String(err),
+    });
+  }
+});
+
+// --------------------- Mug Endpoint ---------------------
+
+app.get("/mug-preview", async (req, res) => {
+  const artworkUrl = req.query.url;
+  if (!artworkUrl || typeof artworkUrl !== "string") {
+    return res.status(400).json({ error: "Parameter 'url' fehlt oder ist ungültig." });
+  }
+
+  const cacheKey = "MUG_" + artworkUrl;
+  if (previewCache.has(cacheKey)) {
+    res.setHeader("Content-Type", "image/png");
+    return res.send(previewCache.get(cacheKey));
+  }
+
+  try {
+    const finalBuffer = await makePreviewWithBgRemoval({
+      artworkUrl,
+      mockupUrl: MUG_MOCKUP_URL,
+      scale: 0.325,
+      offsetX: 0.35,
+      offsetY: 0.39,
+      overlayUrl: undefined,
+    });
+
+    previewCache.set(cacheKey, finalBuffer);
+    res.setHeader("Content-Type", "image/png");
+    res.send(finalBuffer);
+  } catch (err) {
+    console.error("Fehler in /mug-preview:", err);
+    res.status(500).json({
+      error: "Interner Fehler in /mug-preview",
+      detail: err.message || String(err),
+    });
+  }
+});
+
+// --------------------- NEU: Tee weiß Endpoint ---------------------
+
+app.get("/tee-white-preview", async (req, res) => {
+  const artworkUrl = req.query.url;
+  if (!artworkUrl || typeof artworkUrl !== "string") {
+    return res.status(400).json({ error: "Parameter 'url' fehlt oder ist ungültig." });
+  }
+
+  const cacheKey = "TEE_WHITE_" + artworkUrl;
+  if (previewCache.has(cacheKey)) {
+    res.setHeader("Content-Type", "image/png");
+    return res.send(previewCache.get(cacheKey));
+  }
+
+  try {
+    const finalBuffer = await makePreviewWithBgRemoval({
+      artworkUrl,
+      mockupUrl: TEE_WHITE_MOCKUP_URL,
+      scale: 0.36,
+      offsetX: 0.31,
+      offsetY: 0.26,
+      overlayUrl: TEE_WHITE_OVERLAY_URL,
+    });
+
+    previewCache.set(cacheKey, finalBuffer);
+    res.setHeader("Content-Type", "image/png");
+    res.send(finalBuffer);
+  } catch (err) {
+    console.error("Fehler in /tee-white-preview:", err);
+    res.status(500).json({
+      error: "Interner Fehler in /tee-white-preview",
+      detail: err.message || String(err),
+    });
+  }
+});
+
+// --------------------- NEU: Tee schwarz Endpoint ---------------------
+
+app.get("/tee-black-preview", async (req, res) => {
+  const artworkUrl = req.query.url;
+  if (!artworkUrl || typeof artworkUrl !== "string") {
+    return res.status(400).json({ error: "Parameter 'url' fehlt oder ist ungültig." });
+  }
+
+  const cacheKey = "TEE_BLACK_" + artworkUrl;
+  if (previewCache.has(cacheKey)) {
+    res.setHeader("Content-Type", "image/png");
+    return res.send(previewCache.get(cacheKey));
+  }
+
+  try {
+    const finalBuffer = await makePreviewWithBgRemoval({
+      artworkUrl,
+      mockupUrl: TEE_BLACK_MOCKUP_URL,
+      scale: 0.36,
+      offsetX: 0.31,
+      offsetY: 0.26,
+      overlayUrl: TEE_BLACK_OVERLAY_URL,
+    });
+
+    previewCache.set(cacheKey, finalBuffer);
+    res.setHeader("Content-Type", "image/png");
+    res.send(finalBuffer);
+  } catch (err) {
+    console.error("Fehler in /tee-black-preview:", err);
+    res.status(500).json({
+      error: "Interner Fehler in /tee-black-preview",
+      detail: err.message || String(err),
+    });
+  }
+});
 
 // --------------------- Serverstart ---------------------
 
