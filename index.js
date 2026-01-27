@@ -65,82 +65,63 @@ function brightness(c) {
 // --------------------- NEUE GRID-DE-COMPOSITING-LOGIK ---------------------
 
 async function removeGridBackgroundDecomposite(inputBuffer) {
-  const GRID_COLORS = [
-    { r: 255, g: 255, b: 255 }, // weiß
-    { r: 204, g: 204, b: 204 }  // grau
-  ];
-
-  const COLOR_TOL = 35;     // JPEG-Toleranz
-  const MIN_ALPHA = 0.05;  // sehr schwache Reste kappen
+  const BLOCK = 6;
+  const MIN_BRIGHT = 140;
+  const MAX_DIFF = 25;
+  const MIN_RATIO = 0.8;
 
   const img = sharp(inputBuffer).ensureAlpha();
-  const meta = await img.metadata();
-  const { width, height } = meta;
+  const { width, height } = await img.metadata();
+  if (!width || !height) throw new Error("Ungültige Bildgröße");
 
-  if (!width || !height) {
-    throw new Error("Ungültige Bildgröße");
-  }
+  const raw = await img.raw().toBuffer();
 
-  const raw = await img.raw().toBuffer(); // RGBA
+  const idx = (x, y) => (y * width + x) * 4;
 
-  function colorDist(r, g, b, c) {
-    return Math.sqrt(
-      (r - c.r) * (r - c.r) +
-      (g - c.g) * (g - c.g) +
-      (b - c.b) * (b - c.b)
+  function isGrayish(r, g, b) {
+    const br = (r + g + b) / 3;
+    return (
+      br >= MIN_BRIGHT &&
+      Math.abs(r - g) <= MAX_DIFF &&
+      Math.abs(r - b) <= MAX_DIFF &&
+      Math.abs(g - b) <= MAX_DIFF
     );
   }
 
-  for (let i = 0; i < width * height; i++) {
-    const p = i * 4;
+  for (let y = 0; y < height; y += BLOCK) {
+    for (let x = 0; x < width; x += BLOCK) {
+      let total = 0, gray = 0;
 
-    const r = raw[p];
-    const g = raw[p + 1];
-    const b = raw[p + 2];
+      for (let dy = 0; dy < BLOCK; dy++) {
+        for (let dx = 0; dx < BLOCK; dx++) {
+          const px = x + dx;
+          const py = y + dy;
+          if (px >= width || py >= height) continue;
 
-    // nächstgelegene Grid-Farbe bestimmen
-    let bestBg = null;
-    let bestDist = Infinity;
+          const i = idx(px, py);
+          total++;
+          if (isGrayish(raw[i], raw[i + 1], raw[i + 2])) gray++;
+        }
+      }
 
-    for (const bg of GRID_COLORS) {
-      const d = colorDist(r, g, b, bg);
-      if (d < bestDist) {
-        bestDist = d;
-        bestBg = bg;
+      if (total && gray / total >= MIN_RATIO) {
+        for (let dy = 0; dy < BLOCK; dy++) {
+          for (let dx = 0; dx < BLOCK; dx++) {
+            const px = x + dx;
+            const py = y + dy;
+            if (px >= width || py >= height) continue;
+            raw[idx(px, py) + 3] = 0;
+          }
+        }
       }
     }
-
-    // zu weit weg → sicher Motiv
-    if (bestDist > COLOR_TOL) continue;
-
-    // Alpha rekonstruieren (Porter-Duff rückwärts)
-    const alphaR = bestBg.r !== 0 ? 1 - (r - bestBg.r) / (0 - bestBg.r) : 1;
-    const alphaG = bestBg.g !== 0 ? 1 - (g - bestBg.g) / (0 - bestBg.g) : 1;
-    const alphaB = bestBg.b !== 0 ? 1 - (b - bestBg.b) / (0 - bestBg.b) : 1;
-
-    let alpha = (alphaR + alphaG + alphaB) / 3;
-    alpha = Math.max(0, Math.min(1, alpha));
-
-    if (alpha < MIN_ALPHA) {
-      raw[p + 3] = 0;
-      continue;
-    }
-
-    // Vordergrundfarbe rekonstruieren
-    raw[p]     = Math.round((r - (1 - alpha) * bestBg.r) / alpha);
-    raw[p + 1] = Math.round((g - (1 - alpha) * bestBg.g) / alpha);
-    raw[p + 2] = Math.round((b - (1 - alpha) * bestBg.b) / alpha);
-    raw[p + 3] = Math.round(alpha * 255);
   }
 
   return sharp(raw, {
     raw: { width, height, channels: 4 },
-  })
-    .ensureAlpha()
-    .flatten({ background: { r: 0, g: 0, b: 0, alpha: 0 } })
-    .png()
-    .toBuffer();
+  }).png().toBuffer();
 }
+
 
 
 // --------------------- Preview-Erstellung ---------------------
