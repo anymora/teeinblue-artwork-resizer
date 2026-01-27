@@ -65,10 +65,11 @@ function brightness(c) {
 // --------------------- NEUE GRID-DE-COMPOSITING-LOGIK ---------------------
 
 async function removeGridBackgroundDecomposite(inputBuffer) {
-  const BLOCK = 6;
-  const MIN_BRIGHT = 140;
-  const MAX_DIFF = 25;
-  const MIN_RATIO = 0.8;
+  // === HARTE GRID-REGELN (sicher) ===
+  const MAX_W = 8;          // Grid darf niemals breiter sein
+  const MAX_H = 8;          // Grid darf niemals höher sein
+  const MIN_BRIGHT = 180;   // helles Grau / Weiß
+  const COLOR_TOL = 20;     // JPEG-Toleranz
 
   const img = sharp(inputBuffer).ensureAlpha();
   const { width, height } = await img.metadata();
@@ -76,45 +77,80 @@ async function removeGridBackgroundDecomposite(inputBuffer) {
 
   const raw = await img.raw().toBuffer();
 
-  const idx = (x, y) => (y * width + x) * 4;
+  const visited = new Uint8Array(width * height);
+  const remove  = new Uint8Array(width * height);
 
-  function isGrayish(r, g, b) {
+  const idx = (x, y) => y * width + x;
+  const p   = (i) => i * 4;
+
+  function isGridColor(i) {
+    const r = raw[p(i)];
+    const g = raw[p(i) + 1];
+    const b = raw[p(i) + 2];
+
     const br = (r + g + b) / 3;
+
     return (
       br >= MIN_BRIGHT &&
-      Math.abs(r - g) <= MAX_DIFF &&
-      Math.abs(r - b) <= MAX_DIFF &&
-      Math.abs(g - b) <= MAX_DIFF
+      Math.abs(r - g) <= COLOR_TOL &&
+      Math.abs(r - b) <= COLOR_TOL &&
+      Math.abs(g - b) <= COLOR_TOL
     );
   }
 
-  for (let y = 0; y < height; y += BLOCK) {
-    for (let x = 0; x < width; x += BLOCK) {
-      let total = 0, gray = 0;
+  // === CONNECTED COMPONENTS ===
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const start = idx(x, y);
+      if (visited[start] || !isGridColor(start)) continue;
 
-      for (let dy = 0; dy < BLOCK; dy++) {
-        for (let dx = 0; dx < BLOCK; dx++) {
-          const px = x + dx;
-          const py = y + dy;
-          if (px >= width || py >= height) continue;
+      const stack = [start];
+      const component = [];
 
-          const i = idx(px, py);
-          total++;
-          if (isGrayish(raw[i], raw[i + 1], raw[i + 2])) gray++;
+      let minX = x, maxX = x, minY = y, maxY = y;
+      visited[start] = 1;
+
+      while (stack.length) {
+        const cur = stack.pop();
+        component.push(cur);
+
+        const cx = cur % width;
+        const cy = Math.floor(cur / width);
+
+        minX = Math.min(minX, cx);
+        maxX = Math.max(maxX, cx);
+        minY = Math.min(minY, cy);
+        maxY = Math.max(maxY, cy);
+
+        // ❌ SOFORT ABBRUCH: KEIN GRID
+        if (maxX - minX > MAX_W || maxY - minY > MAX_H) {
+          component.length = 0;
+          break;
         }
-      }
 
-      if (total && gray / total >= MIN_RATIO) {
-        for (let dy = 0; dy < BLOCK; dy++) {
-          for (let dx = 0; dx < BLOCK; dx++) {
-            const px = x + dx;
-            const py = y + dy;
-            if (px >= width || py >= height) continue;
-            raw[idx(px, py) + 3] = 0;
+        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nx = cx + dx;
+          const ny = cy + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+
+          const ni = idx(nx, ny);
+          if (!visited[ni] && isGridColor(ni)) {
+            visited[ni] = 1;
+            stack.push(ni);
           }
         }
       }
+
+      // ✅ NUR KLEINE FLÄCHEN DÜRFEN ENTFERNT WERDEN
+      for (const i of component) {
+        remove[i] = 1;
+      }
     }
+  }
+
+  // === ALPHA SETZEN ===
+  for (let i = 0; i < remove.length; i++) {
+    if (remove[i]) raw[p(i) + 3] = 0;
   }
 
   return sharp(raw, {
