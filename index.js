@@ -65,9 +65,8 @@ function brightness(c) {
 // --------------------- NEUE GRID-DE-COMPOSITING-LOGIK ---------------------
 
 async function removeGridBackgroundDecomposite(inputBuffer) {
-  const MAX_SIZE = 9;          // Grid max ~6px, JPEG-Toleranz
-  const MIN_BRIGHT = 130;      // deutlich runter
-  const COLOR_TOL = 40;        // JPEG realistisch
+  const COLOR_TOL = 45;     // JPEG realistisch
+  const MIN_ALPHA = 0.08;  // unterhalb => transparent
 
   const img = sharp(inputBuffer).ensureAlpha();
   const { width, height } = await img.metadata();
@@ -75,74 +74,55 @@ async function removeGridBackgroundDecomposite(inputBuffer) {
 
   const raw = await img.raw().toBuffer();
 
-  const visited = new Uint8Array(width * height);
-  const remove  = new Uint8Array(width * height);
+  const p = (i) => i * 4;
 
-  const idx = (x, y) => y * width + x;
-  const p   = (i) => i * 4;
-
-  function isGrayish(i) {
-    const r = raw[p(i)];
-    const g = raw[p(i) + 1];
-    const b = raw[p(i) + 2];
-    const br = (r + g + b) / 3;
-
+  function isGrayish(r, g, b) {
     return (
-      br >= MIN_BRIGHT &&
-      Math.abs(r - g) <= COLOR_TOL &&
-      Math.abs(r - b) <= COLOR_TOL &&
-      Math.abs(g - b) <= COLOR_TOL
+      Math.abs(r - g) < COLOR_TOL &&
+      Math.abs(r - b) < COLOR_TOL &&
+      Math.abs(g - b) < COLOR_TOL
     );
   }
 
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const start = idx(x, y);
-      if (visited[start] || !isGrayish(start)) continue;
+  for (let i = 0; i < width * height; i++) {
+    const o = p(i);
+    const r = raw[o];
+    const g = raw[o + 1];
+    const b = raw[o + 2];
 
-      const stack = [start];
-      const comp = [];
+    if (!isGrayish(r, g, b)) continue;
 
-      let minX = x, maxX = x, minY = y, maxY = y;
-      visited[start] = 1;
+    // Lokales Background schätzen (Mittelwert der Umgebung)
+    let bgR = 0, bgG = 0, bgB = 0, n = 0;
 
-      while (stack.length) {
-        const cur = stack.pop();
-        comp.push(cur);
+    const x = i % width;
+    const y = Math.floor(i / width);
 
-        const cx = cur % width;
-        const cy = Math.floor(cur / width);
-
-        minX = Math.min(minX, cx);
-        maxX = Math.max(maxX, cx);
-        minY = Math.min(minY, cy);
-        maxY = Math.max(maxY, cy);
-
-        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-          const nx = cx + dx;
-          const ny = cy + dy;
-          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-
-          const ni = idx(nx, ny);
-          if (!visited[ni] && isGrayish(ni)) {
-            visited[ni] = 1;
-            stack.push(ni);
-          }
-        }
-      }
-
-      const w = maxX - minX + 1;
-      const h = maxY - minY + 1;
-
-      // ✅ NUR HIER ENTSCHEIDEN
-      if (w <= MAX_SIZE && h <= MAX_SIZE) {
-        for (const i of comp) remove[i] = 1;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+        const ni = (ny * width + nx) * 4;
+        bgR += raw[ni];
+        bgG += raw[ni + 1];
+        bgB += raw[ni + 2];
+        n++;
       }
     }
-  }
 
-  for (let i = 0; i < remove.length; i++) {
-    if (remove[i]) raw[p(i) + 3] = 0;
+    bgR /= n; bgG /= n; bgB /= n;
+
+    // Alpha rekonstruieren
+    const alpha =
+      1 -
+      ((Math.abs(r - bgR) +
+        Math.abs(g - bgG) +
+        Math.abs(b - bgB)) / 3) / 255;
+
+    if (alpha < MIN_ALPHA) {
+      raw[o + 3] = 0;
+    }
   }
 
   return sharp(raw, {
