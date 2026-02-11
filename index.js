@@ -66,7 +66,6 @@ function brightness(c) {
 
 // --------------------- NEUE GRID-DE-COMPOSITING-LOGIK ---------------------
 
-const sharp = require('sharp');
 
 const MAX_BLOCK_SIZE = 6;
 const MIN_BLOCK_SIZE = 1;
@@ -480,8 +479,6 @@ async function removeGridBackgroundAdvanced(inputBuffer) {
   return sharp(raw, { raw: { width, height, channels: 4 } }).png().toBuffer();
 }
 
-module.exports = { removeGridBackgroundAdvanced };
-
 
 
 
@@ -502,7 +499,7 @@ async function makePreviewWithBgRemoval({
   // NEU: Grid-De-Compositing statt Flood-Fill
   let artTransparent;
   try {
-    artTransparent = await removeGridBackgroundDecomposite(artBuf);
+    artTransparent = await removeGridBackgroundAdvanced(artBuf);
   } catch (err) {
     console.error("BG-Removal Fehler, verwende Original mit Alpha:", err);
     artTransparent = await sharp(artBuf).ensureAlpha().png().toBuffer();
